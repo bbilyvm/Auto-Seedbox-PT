@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Auto-Seedbox-PT (ASP) v1.0 
+# Auto-Seedbox-PT (ASP) v1.1
 # qBittorrent  + libtorrent  + Vertex + FileBrowser 一键安装脚本
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
 # 参数说明:
@@ -98,14 +98,52 @@ wait_for_lock() {
     done
 }
 
+# 🟢 增强版防火墙配置函数 (支持 UFW/Firewalld/Iptables)
 open_port() {
-    local port=$1; local proto=${2:-tcp}
-    if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-        ufw allow "$port/$proto" >/dev/null 2>&1 || true
+    local port=$1
+    local proto=${2:-tcp}
+    local added=false
+
+    # 1. 尝试 UFW (Ubuntu 默认)
+    if command -v ufw >/dev/null && systemctl is-active --quiet ufw; then
+        ufw allow "$port/$proto" >/dev/null 2>&1
+        log_info "防火墙(UFW) 已放行端口: $port/$proto"
+        added=true
+    fi
+
+    # 2. 尝试 Firewalld (Oracle/CentOS 常见)
+    if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
+        firewall-cmd --zone=public --add-port="$port/$proto" --permanent >/dev/null 2>&1
+        firewall-cmd --reload >/dev/null 2>&1
+        log_info "防火墙(Firewalld) 已放行端口: $port/$proto"
+        added=true
+    fi
+
+    # 3. 尝试 iptables (通用兜底)
+    # 只要命令存在，就尝试添加规则，确保万无一失
+    if command -v iptables >/dev/null; then
+        # 检查规则是否已存在，不存在则添加
+        if ! iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
+            # 插入到第一行，确保优先级最高
+            iptables -I INPUT 1 -p "$proto" --dport "$port" -j ACCEPT
+            log_info "防火墙(iptables) 已放行端口: $port/$proto"
+            
+            # 尝试持久化保存
+            if command -v netfilter-persistent >/dev/null; then
+                netfilter-persistent save >/dev/null 2>&1
+            elif command -v iptables-save >/dev/null; then
+                mkdir -p /etc/iptables
+                iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+            fi
+            added=true
+        fi
+    fi
+
+    if [[ "$added" == "false" ]]; then
+        log_warn "未检测到活跃的防火墙服务，端口 $port 可能已开放或需手动设置。"
     fi
 }
 
-# 🟢 增强：增加端口占用检测
 check_port_occupied() {
     local port=$1
     if command -v netstat >/dev/null; then
@@ -134,7 +172,7 @@ get_input_port() {
     done
 }
 
-# ================= 2. 用户管理 (动态路径) =================
+# ================= 2. 用户管理 =================
 
 setup_user() {
     if [[ "$APP_USER" == "root" ]]; then
@@ -160,7 +198,6 @@ uninstall() {
     local mode=$1
     print_banner "执行深度卸载流程"
     
-    # 🟢 修正：先让用户确认要卸载哪个用户的数据，防止误删
     if [[ "$mode" == "--purge" ]]; then
         read -p "请输入当初安装时的用户名 (默认为 admin，root 请填 root): " target_user < /dev/tty
         target_user=${target_user:-admin}
@@ -198,20 +235,27 @@ uninstall() {
     if [ -f /etc/security/limits.conf ]; then
         sed -i '/# Auto-Seedbox-PT/d' /etc/security/limits.conf || true
     fi
+    
+    # 移除防火墙规则 (尽力而为)
+    if command -v iptables >/dev/null; then
+        iptables -D INPUT -p tcp --dport $QB_WEB_PORT -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport $QB_BT_PORT -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p udp --dport $QB_BT_PORT -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport $VX_PORT -j ACCEPT 2>/dev/null || true
+        iptables -D INPUT -p tcp --dport $FB_PORT -j ACCEPT 2>/dev/null || true
+    fi
+
     systemctl daemon-reload
     sysctl --system >/dev/null 2>&1 || true
 
     if [[ "$mode" == "--purge" ]]; then
         log_warn "4. 清理配置文件..."
-        # 🟢 修正：根据前面输入的用户名清理，而非硬编码 /home/*
         if [[ -d "$target_home" ]]; then
              rm -rf "$target_home/.config/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser"
              log_info "已清理 $target_home 下的相关配置。"
         else
              log_warn "未找到用户目录 $target_home，跳过文件清理。"
         fi
-        
-        # 始终尝试清理 root 下的残留 (防止当初是用 root 装的)
         rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser"
     fi
     
@@ -219,7 +263,7 @@ uninstall() {
     exit 0
 }
 
-# ================= 4. 智能系统优化 (-t) =================
+# ================= 4. 智能系统优化 =================
 
 optimize_system() {
     print_banner "应用智能系统优化 (ASP-Tuned)"
@@ -228,7 +272,6 @@ optimize_system() {
     local rmem_max=$((mem_kb * 1024 / 2)); [[ $rmem_max -gt 134217728 ]] && rmem_max=134217728
     local tcp_mem_min=$((mem_kb / 16)); local tcp_mem_def=$((mem_kb / 8)); local tcp_mem_max=$((mem_kb / 4))
 
-    # 1. 内核参数
     cat > /etc/sysctl.d/99-ptbox.conf << EOF
 fs.file-max = 1048576
 fs.nr_open = 1048576
@@ -251,7 +294,6 @@ net.ipv4.tcp_low_latency = 1
 EOF
     sysctl --system >/dev/null 2>&1 || true
 
-    # 2. 文件句柄
     if ! grep -q "Auto-Seedbox-PT" /etc/security/limits.conf; then
         cat >> /etc/security/limits.conf << EOF
 # Auto-Seedbox-PT Limits
@@ -262,19 +304,11 @@ root soft nofile 1048576
 EOF
     fi
 
-    # 3. 增强版开机启动脚本 (虚拟化检测 + 磁盘调度 + 网卡优化)
     cat > /usr/local/bin/asp-tune.sh << 'EOF_SCRIPT'
 #!/bin/bash
-
-# 1. 虚拟化检测
 IS_VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
-
-# 2. 磁盘 I/O 优化
 for disk in $(lsblk -nd --output NAME | grep -v '^md' | grep -v '^loop'); do
-    # 通用优化：预读 (Read-Ahead)
     blockdev --setra 4096 "/dev/$disk" 2>/dev/null
-
-    # 仅物理机调整调度器
     if [[ "$IS_VIRT" == "none" ]]; then
         queue_path="/sys/block/$disk/queue"
         if [ -f "$queue_path/scheduler" ]; then
@@ -287,18 +321,12 @@ for disk in $(lsblk -nd --output NAME | grep -v '^md' | grep -v '^loop'); do
         fi
     fi
 done
-
-# 3. 网络物理层与路由优化
 ETH=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
 if [ -n "$ETH" ]; then
-    # 增加传输队列
     ifconfig "$ETH" txqueuelen 10000 2>/dev/null
-    # Ring Buffer (动态降级)
     ethtool -G "$ETH" rx 4096 tx 4096 2>/dev/null || true
     ethtool -G "$ETH" rx 2048 tx 2048 2>/dev/null || true 
 fi
-
-# 4. 拥塞窗口优化 (InitCWND)
 DEF_ROUTE=$(ip -o -4 route show to default | head -n1)
 if [[ -n "$DEF_ROUTE" ]]; then
     ip route change $DEF_ROUTE initcwnd 25 initrwnd 25 2>/dev/null || true
@@ -512,14 +540,13 @@ while getopts "u:p:c:q:vftod:k:" opt; do
 done
 
 check_root
-# 默认用户
 if [[ -z "$APP_USER" ]]; then APP_USER="admin"; fi
 if [[ -n "$APP_PASS" ]]; then validate_pass "$APP_PASS"; fi
 
 print_banner "环境初始化"
 wait_for_lock; export DEBIAN_FRONTEND=noninteractive
-# 🟢 修正：明确安装 Python3 依赖，防止密码生成失败
-apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
+# 🟢 安装基础依赖 (含防火墙和 Python 支持)
+apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool iptables >/dev/null
 
 if [[ -z "$APP_PASS" ]]; then
     while true; do
