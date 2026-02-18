@@ -14,17 +14,18 @@
 
 ### 🧠 双核智能引擎
 脚本会自动识别 qBittorrent 的内核版本，并应用完全不同的优化策略：
-- **v4 模式 (libtorrent 1.x)**：优化应用层缓存，根据磁盘类型调整异步 I/O 线程。
-- **v5 模式 (libtorrent 2.x)**：启用 MMap 策略，调整内核脏页比例和 Swap，利用系统空闲内存加速 I/O。
+- **v4 模式 (libtorrent 1.x)**：优化应用层缓存，根据磁盘类型调整异步 I/O 线程（SSD 自动设为 16，HDD 保持 4）。
+- **v5 模式 (libtorrent 2.x)**：启用 MMap 策略，调整内核脏页比例和 Swap，利用系统空闲内存加速 I/O，缓存设为 `-1`（自动管理）。
 
 ### 🔄 版本随心选
-- **稳定养老**：默认安装 **4.3.9**（PT 圈公认最稳版本，默认使用参数优化版本）。
+- **稳定养老**：默认安装 **4.3.9**（PT 圈公认最稳版本，使用预编译二进制）。
 - **尝鲜技术**：支持 `-q latest` 一键安装最新版，5.X 以上推荐 5.0.4 版本。
 - **指定版本**：支持安装任意历史版本（如 `4.6.4`、`5.0.4`），脚本自动从 GitHub API 搜索下载。
 
 ### 🎛️ 灵活配置
-- **交互式端口**：使用 `-o` 参数开启交互模式，自定义 WebUI、BT 监听及应用端口。
-- **数据一键恢复**：安装 Vertex 时支持 `-d` 指定备份 URL，自动下载并恢复数据，甚至修正端口配置。
+- **交互式端口**：使用 `-o` 参数开启交互模式，自定义 WebUI、BT 监听及应用端口，并自动检测端口占用。
+- **数据一键恢复**：安装 Vertex 时支持 `-d` 指定备份 URL，自动下载并恢复数据，甚至自动修正 qBittorrent 客户端配置（URL、用户名、密码）。
+- **智能系统优化**：动态内存计算、虚拟化环境检测、磁盘预读、网卡 Ring Buffer 调整、拥塞窗口优化，全面适配物理机与虚拟机。
 
 ---
 
@@ -32,7 +33,6 @@
 
 - **操作系统**: **Debian 10+ / Ubuntu 20.04+**
 - **硬件架构**: x86_64 (AMD64) / aarch64 (ARM64)
-- **用户权限**: Root 用户
 
 ---
 
@@ -44,8 +44,7 @@
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -c 1024 -v -f -t
 ```
 
-### 2. 基础安装
-安装 qBittorrent 4.3.9（稳定版）。
+### 2. 基础安装（仅 qBittorrent）
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -c 1024 -t
 ```
@@ -78,14 +77,14 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 | 参数 | 必填 | 描述 | 示例 |
 |------|------|------|------|
-| `-u` | ✅ | 用户名（软件用户名） | `-u admin` |
+| `-u` | ✅ | 用户名（用于运行服务和登录WebUI） | `-u admin` |
 | `-p` | ✅ | 密码（必须 ≥ 8 位） | `-p mysecurepass` |
-| `-c` | ✅ | 缓存大小 (MB)<br>注：v5 模式下仅作安装校验，实际由内核管理，建议1/4内存大小 | `-c 2048` |
+| `-c` | ✅ | 缓存大小 (MB)<br>注：v5 模式下仅作安装校验，实际由内核管理，建议设为内存大小的 1/4 | `-c 2048` |
 | `-q` | ❌ | 指定版本，支持 `4.3.9`（默认）、`latest` 或具体版本号如 `5.0.4` | `-q latest` |
 | `-v` | ❌ | 安装 Vertex 面板 | `-v` |
 | `-f` | ❌ | 安装 FileBrowser | `-f` |
 | `-t` | ❌ | 启用系统内核优化（强烈推荐） | `-t` |
-| `-o` | ❌ | 自定义端口（交互式询问） | `-o` |
+| `-o` | ❌ | 自定义端口（交互式询问，自动检测占用） | `-o` |
 | `-d` | ❌ | Vertex 备份 ZIP 下载链接 | `-d http://...` |
 | `-k` | ❌ | Vertex 备份 ZIP 解压密码 | `-k 123456` |
 
@@ -115,7 +114,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 **A:**
 - **v4 (4.3.9)**：极其稳定，适合长期保种，对内存控制严格，适合小内存机器或追求极致稳定的用户。
-- **v5 (Latest)**：性能更强，适合大带宽刷流，但对磁盘 I/O 机制依赖较重，推荐 5.0.4 版本，5.X 版本的 QB 设置需要自行进入设置一遍。
+- **v5 (Latest)**：性能更强，适合大带宽刷流，但对磁盘 I/O 机制依赖较重，推荐 5.0.4 版本。安装后需手动进入设置确认优化参数。
 
 **Q: 脚本报错 `syntax error` 或乱码？**
 
@@ -123,27 +122,27 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 **Q: Vertex 导入备份后鉴权错误？**
 
-**A:** 使用备份创建时Vertex的用户名和密码是由脚本参数设置（即 -u 和 -p），若出现不同请修改 Vertex 账号密码。
+**A:** 备份中的用户名和密码会被脚本自动覆盖为当前安装时指定的 `-u` 和 `-p`，若仍出现错误，请手动检查 `/root/vertex/data/setting.json` 中的用户名和密码是否为预期值。
 
-**Q: Vertex 设置 qb 下载器 127.0.0.1 地址无法打开？**
+**Q: Vertex 设置 qBittorrent 下载器时，`127.0.0.1` 无法连接？**
 
-**A:** 修改地址为 Docker 容器通往宿主机的网关 `172.17.0.1`，如果还有问题直接填：`http://你的服务器公网IP:端口`。
+**A:** 在 Docker 环境中，容器内无法直接使用 `127.0.0.1` 访问宿主机。应使用 Docker 网桥网关地址 `172.17.0.1`，或者直接填写公网 IP。脚本安装完成后会输出正确的内网连接地址。
 
-**Q: 打开网页提示 Unauthorized**
+**Q: 打开 qBittorrent WebUI 提示 Unauthorized？**
 
 **A:**
-1. 关闭安全设置中的“启用主机表头验证”选项；首次局域网进入可以在端口后面增加“/”。
-2. 如果通过远程访问遇到页面显示异常，可以尝试关闭跨站请求伪造（CSRF）保护，在低版本 qB 中可能无效。
-3. 编辑 `qBittorrent.conf` 文件（路径通常为 `~/.config/qBittorrent/qBittorrent.conf` 或容器内挂载路径），找到或添加以下参数并设为 `false`：
+1. 首次局域网访问时，在端口号后增加斜杠 `/`（如 `http://IP:8080/`）可绕过部分浏览器缓存问题。
+2. 远程访问时，请确保以下配置项已正确设置（脚本默认已配置）：
    ```ini
    WebUI\HostHeaderValidation=false
-   WebUI\HTTPS\Enabled=false
    WebUI\CSRFProtection=false
+   WebUI\LocalHostAuthenticationEnabled=false
    ```
-   *(注：未配置 HTTPS 证书但启用了 HTTPS 选项也会导致此错误)*
+   配置文件路径为 `~/.config/qBittorrent/qBittorrent.conf`（或对应系统用户的目录）。
+
 
 ---
 
 ## 📜 License
 
-本项目基于 [MIT License](LICENSE) 开源，基于 [vivibudong/PT-Seedbox](https://github.com/vivibudong/PT-Seedbox) 深度重构。您可以自由修改、分发，但请保留原作者署名。
+本项目基于 [MIT License](LICENSE) 开源，基于 [vivibudong/PT-Seedbox](https://github.com/vivibudong/PT-Seedbox) 深度重构，感谢原作者。您可以自由修改、分发，但请保留原作者署名。
