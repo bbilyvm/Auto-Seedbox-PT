@@ -450,7 +450,7 @@ install_apps() {
     fi
 
     if [[ "$DO_VX" == "true" ]]; then
-        print_banner "部署 Vertex (Smart-Polling)"
+        print_banner "部署 Vertex (智能轮询)"
         
         mkdir -p "$HB/vertex/data"
         chmod 777 "$HB/vertex/data"
@@ -628,8 +628,7 @@ if [[ "$DO_VX" == "true" ]]; then
     VX_IN_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' vertex 2>/dev/null || echo "Unknown")
     VX_GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
     echo -e "🌐 Vertex:       ${GREEN}http://$PUB_IP:$VX_PORT${NC}"
-    echo -e "    └─ Docker 内网: ${BLUE}$VX_IN_IP:3000${NC}"
-    echo -e "    └─ 内网连接qBit: ${YELLOW}$VX_GW:$QB_WEB_PORT${NC}"
+    echo -e "    └─ 下载器连接填写: ${YELLOW}$VX_GW:$QB_WEB_PORT${NC}"
 fi
 
 if [[ "$DO_FB" == "true" ]]; then
@@ -640,7 +639,7 @@ echo -e "${BLUE}--------------------------------------------------------${NC}"
 echo -e "🔐 ${GREEN}账号信息${NC}"
 echo -e "系统用户: ${YELLOW}$APP_USER${NC}"
 echo -e "Web 密码: ${YELLOW}$APP_PASS${NC}"
-echo -e "BT 端口 : ${YELLOW}$QB_BT_PORT${NC} (TCP/UDP)"
+echo -e "BT 监听端口 : ${YELLOW}$QB_BT_PORT${NC} (TCP/UDP)"
 echo -e "${BLUE}========================================================${NC}"
 
 [[ "$DO_TUNE" == "true" ]] && echo -e "${YELLOW}提示: 智能系统优化已生效。${NC}"
