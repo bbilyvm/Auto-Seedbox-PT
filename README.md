@@ -45,34 +45,40 @@
 
 ### 1. 一键安装（推荐）
 使用以下命令直接运行脚本（无需下载）：
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) -u ptseedbox2026 -p PtSeedB0x-2026 -c 1024 -v -f -t
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u ptseedbox2026 -p PtSeedB0x-2026 -c 1024 -v -f -t
 ```
 
 ### 2. 基础安装
 安装 qBittorrent 4.3.9（稳定版）。
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) -u admin -p password123 -c 1024 -t
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p password123 -c 1024 -t
 ```
 
 ### 3. 全能安装（带 Vertex 和 FileBrowser）
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) -u admin -p password123 -c 1024 -v -f -t
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p password123 -c 1024 -v -f -t
 ```
 
 ### 4. 自定义端口（交互模式）
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) -u admin -p password123 -c 1024 -v -f -t -o
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p password123 -c 1024 -v -f -t -o
 ```
 
 ### 5. 安装最新版（v5.x）
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) -u admin -p password123 -c 1024 -q latest -t
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p password123 -c 1024 -q latest -t
 ```
 
 ### 6. 迁移与恢复（恢复 Vertex 数据）
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) -u admin -p password123 -c 1024 -v -f -t -d "[https://your-server.com/backup/vertex.zip](https://your-server.com/backup/vertex.zip)" -k "zip_password"
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p password123 -c 1024 -v -f -t -d "https://your-server.com/backup/vertex.zip" -k "zip_password"
 ```
 
 > **提示**：以上命令中的用户名、密码、缓存大小请根据实际情况修改。
@@ -82,10 +88,10 @@ bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/ma
 ## 📝 参数详解
 
 | 参数 | 必填 | 描述 | 示例 |
-|------|------|------|------|
+| :--- | :--- | :--- | :--- |
 | `-u` | ✅ | 用户名（软件用户名） | `-u admin` |
 | `-p` | ✅ | 密码（必须 ≥ 12 位） | `-p mysecurepass` |
-| `-c` | ✅ | 缓存大小 (MB)<br>注：v5 模式下仅作安装校验，实际由内核管理，建议1/4内存大小 | `-c 2048` |
+| `-c` | ✅ | 缓存大小 (MB)<br>注：v5 模式下仅作安装校验，实际由内核管理，建议 1/4 内存大小 | `-c 2048` |
 | `-q` | ❌ | 指定版本，支持 `4.3.9`（默认）、`latest` 或具体版本号如 `5.0.4` | `-q latest` |
 | `-v` | ❌ | 安装 Vertex 面板 | `-v` |
 | `-f` | ❌ | 安装 FileBrowser | `-f` |
@@ -99,13 +105,15 @@ bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/ma
 ## 🗑️ 卸载与清理
 
 **普通卸载（保留数据）**
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) --uninstall
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) --uninstall
 ```
 
 **彻底清除（删库）** ⚠️ 警告：这将连同用户主目录及所有下载文件一并删除！
+
 ```bash
-bash <(wget -qO- [https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh](https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh)) --purge
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) --purge
 ```
 
 ---
