@@ -123,7 +123,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 **Q: Vertex 导入备份后鉴权错误？**
 
-**A:** 请确保备份文件的账号密码和脚本设置的账号密码参数相同，若不同请修改 Vertex 账号密码。
+**A:** 使用备份创建时Vertex的用户名和密码是由脚本参数设置（即 -u 和 -p），若出现不同请修改 Vertex 账号密码。
 
 **Q: Vertex 设置 qb 下载器 127.0.0.1 地址无法打开？**
 
