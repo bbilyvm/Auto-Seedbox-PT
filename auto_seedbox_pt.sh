@@ -44,7 +44,7 @@ VX_RESTORE_URL=""
 VX_ZIP_PASS=""
 INSTALLED_MAJOR_VER="4"
 
-# 默认 Home 目录，稍后根据用户动态调整
+# 默认 Home 目录，稍后动态调整
 HB="/root"
 
 TEMP_DIR=$(mktemp -d -t asp-XXXXXX)
@@ -105,35 +105,51 @@ open_port() {
     fi
 }
 
+# 🟢 增强：增加端口占用检测
+check_port_occupied() {
+    local port=$1
+    if command -v netstat >/dev/null; then
+        netstat -tuln | grep -q ":$port " && return 0
+    elif command -v ss >/dev/null; then
+        ss -tuln | grep -q ":$port " && return 0
+    fi
+    return 1
+}
+
 get_input_port() {
     local prompt=$1; local default=$2; local port
     while true; do
         read -p "$prompt [默认 $default]: " port < /dev/tty
         port=${port:-$default}
-        [[ "$port" =~ ^[0-9]+$ ]] && [[ "$port" -ge 1 ]] && [[ "$port" -le 65535 ]] && echo "$port" && return 0
-        log_warn "无效输入，请输入 1-65535 端口号。"
+        if [[ ! "$port" =~ ^[0-9]+$ ]] || [[ "$port" -lt 1 ]] || [[ "$port" -gt 65535 ]]; then
+            log_warn "无效输入，请输入 1-65535 端口号。"
+            continue
+        fi
+        if check_port_occupied "$port"; then
+            log_warn "端口 $port 已被占用，请更换！"
+            continue
+        fi
+        echo "$port"
+        return 0
     done
 }
 
-# ================= 2. 用户管理 (核心逻辑) =================
+# ================= 2. 用户管理 (动态路径) =================
 
 setup_user() {
-    # 兼容 Root 用户
     if [[ "$APP_USER" == "root" ]]; then
         HB="/root"
         log_info "以 Root 身份运行服务。"
         return
     fi
 
-    # 检测系统用户是否存在
     if id "$APP_USER" &>/dev/null; then
-        log_info "系统用户 $APP_USER 已存在，将直接复用。"
+        log_info "系统用户 $APP_USER 已存在，复用之。"
     else
         log_info "创建系统用户: $APP_USER"
         useradd -m -s /bin/bash "$APP_USER"
     fi
 
-    # 动态获取该用户的 Home 目录
     HB=$(eval echo ~$APP_USER)
     log_info "工作目录设定为: $HB"
 }
@@ -143,11 +159,19 @@ setup_user() {
 uninstall() {
     local mode=$1
     print_banner "执行深度卸载流程"
+    
+    # 🟢 修正：先让用户确认要卸载哪个用户的数据，防止误删
+    if [[ "$mode" == "--purge" ]]; then
+        read -p "请输入当初安装时的用户名 (默认为 admin，root 请填 root): " target_user < /dev/tty
+        target_user=${target_user:-admin}
+        target_home=$(eval echo ~$target_user 2>/dev/null || echo "/home/$target_user")
+        log_warn "将清理用户 $target_user 位于 $target_home 下的配置文件。"
+    fi
+
     read -p "确认要卸载所有组件吗？此操作不可逆！ [y/n]: " confirm < /dev/tty
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then exit 0; fi
 
     log_info "1. 停止并移除服务..."
-    # 停止所有相关服务
     for svc in $(systemctl list-units --full -all | grep "qbittorrent-nox@" | awk '{print $1}'); do
         systemctl stop "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
@@ -178,30 +202,33 @@ uninstall() {
     sysctl --system >/dev/null 2>&1 || true
 
     if [[ "$mode" == "--purge" ]]; then
-        log_warn "4. 尝试清理用户数据..."
-        read -p "是否删除相关的配置文件? (不会删除用户本身) [y/n]: " del_conf < /dev/tty
-        if [[ "$del_conf" =~ ^[Yy]$ ]]; then
-             rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser"
-             rm -rf "/home/*/.config/qBittorrent" "/home/*/vertex" "/home/*/.config/filebrowser"
-             log_info "配置文件已清除。"
+        log_warn "4. 清理配置文件..."
+        # 🟢 修正：根据前面输入的用户名清理，而非硬编码 /home/*
+        if [[ -d "$target_home" ]]; then
+             rm -rf "$target_home/.config/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser"
+             log_info "已清理 $target_home 下的相关配置。"
+        else
+             log_warn "未找到用户目录 $target_home，跳过文件清理。"
         fi
+        
+        # 始终尝试清理 root 下的残留 (防止当初是用 root 装的)
+        rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser"
     fi
     
     log_info "卸载完成。"
     exit 0
 }
 
-# ================= 4. 智能系统优化 (增强版) =================
+# ================= 4. 智能系统优化 (-t) =================
 
 optimize_system() {
     print_banner "应用智能系统优化 (ASP-Tuned)"
     
-    # 动态内存计算 (更精确适配不同内存大小)
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     local rmem_max=$((mem_kb * 1024 / 2)); [[ $rmem_max -gt 134217728 ]] && rmem_max=134217728
     local tcp_mem_min=$((mem_kb / 16)); local tcp_mem_def=$((mem_kb / 8)); local tcp_mem_max=$((mem_kb / 4))
 
-    # 1. Sysctl 内核参数优化
+    # 1. 内核参数
     cat > /etc/sysctl.d/99-ptbox.conf << EOF
 fs.file-max = 1048576
 fs.nr_open = 1048576
@@ -224,7 +251,7 @@ net.ipv4.tcp_low_latency = 1
 EOF
     sysctl --system >/dev/null 2>&1 || true
 
-    # 2. 优化文件句柄限制
+    # 2. 文件句柄
     if ! grep -q "Auto-Seedbox-PT" /etc/security/limits.conf; then
         cat >> /etc/security/limits.conf << EOF
 # Auto-Seedbox-PT Limits
@@ -239,12 +266,12 @@ EOF
     cat > /usr/local/bin/asp-tune.sh << 'EOF_SCRIPT'
 #!/bin/bash
 
-# 1. 虚拟化检测 (避免在虚拟机中无效设置调度器)
+# 1. 虚拟化检测
 IS_VIRT=$(systemd-detect-virt 2>/dev/null || echo "none")
 
 # 2. 磁盘 I/O 优化
 for disk in $(lsblk -nd --output NAME | grep -v '^md' | grep -v '^loop'); do
-    # 通用优化：预读 (Read-Ahead) - 对物理机和虚拟机都有效
+    # 通用优化：预读 (Read-Ahead)
     blockdev --setra 4096 "/dev/$disk" 2>/dev/null
 
     # 仅物理机调整调度器
@@ -266,12 +293,12 @@ ETH=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
 if [ -n "$ETH" ]; then
     # 增加传输队列
     ifconfig "$ETH" txqueuelen 10000 2>/dev/null
-    # Ring Buffer (接收/发送缓冲区)
+    # Ring Buffer (动态降级)
     ethtool -G "$ETH" rx 4096 tx 4096 2>/dev/null || true
     ethtool -G "$ETH" rx 2048 tx 2048 2>/dev/null || true 
 fi
 
-# 4. 拥塞窗口优化 (InitCWND) - 提升慢启动速度
+# 4. 拥塞窗口优化 (InitCWND)
 DEF_ROUTE=$(ip -o -4 route show to default | head -n1)
 if [[ -n "$DEF_ROUTE" ]]; then
     ip route change $DEF_ROUTE initcwnd 25 initrwnd 25 2>/dev/null || true
@@ -398,7 +425,6 @@ install_apps() {
              need_init=false
         fi
 
-        # 启动容器
         log_info "启动 Vertex 容器..."
         docker run -d --name vertex \
             --restart unless-stopped \
@@ -486,11 +512,14 @@ while getopts "u:p:c:q:vftod:k:" opt; do
 done
 
 check_root
+# 默认用户
 if [[ -z "$APP_USER" ]]; then APP_USER="admin"; fi
 if [[ -n "$APP_PASS" ]]; then validate_pass "$APP_PASS"; fi
 
 print_banner "环境初始化"
-wait_for_lock; export DEBIAN_FRONTEND=noninteractive; apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
+wait_for_lock; export DEBIAN_FRONTEND=noninteractive
+# 🟢 修正：明确安装 Python3 依赖，防止密码生成失败
+apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
 
 if [[ -z "$APP_PASS" ]]; then
     while true; do
