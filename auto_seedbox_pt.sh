@@ -43,6 +43,7 @@ CUSTOM_PORT=false
 VX_RESTORE_URL=""
 VX_ZIP_PASS=""
 INSTALLED_MAJOR_VER="4"
+ACTION="install" 
 
 # 默认 Home 目录，稍后动态调整
 HB="/root"
@@ -120,15 +121,10 @@ open_port() {
     fi
 
     # 3. 尝试 iptables (通用兜底)
-    # 只要命令存在，就尝试添加规则，确保万无一失
     if command -v iptables >/dev/null; then
-        # 检查规则是否已存在，不存在则添加
         if ! iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
-            # 插入到第一行，确保优先级最高
             iptables -I INPUT 1 -p "$proto" --dport "$port" -j ACCEPT
             log_info "防火墙(iptables) 已放行端口: $port/$proto"
-            
-            # 尝试持久化保存
             if command -v netfilter-persistent >/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1
             elif command -v iptables-save >/dev/null; then
@@ -192,23 +188,44 @@ setup_user() {
     log_info "工作目录设定为: $HB"
 }
 
-# ================= 3. 深度卸载逻辑 =================
+# ================= 3. 深度卸载逻辑 (智能侦测版) =================
 
 uninstall() {
     local mode=$1
     print_banner "执行深度卸载流程"
     
+    # 🕵️‍♂️ 智能扫描系统中的 qBittorrent 服务用户
+    log_info "正在扫描已安装的用户..."
+    # 提取 systemd 服务名中的用户名部分
+    local detected_users=$(systemctl list-units --full -all --no-legend 'qbittorrent-nox@*' | sed -n 's/.*qbittorrent-nox@\([^.]*\)\.service.*/\1/p' | sort -u | tr '\n' ' ')
+    
+    if [[ -z "$detected_users" ]]; then
+        detected_users="未检测到活跃服务 (可能是 admin)"
+    fi
+    
+    echo -e "${YELLOW}=================================================${NC}"
+    echo -e "${YELLOW} 提示: 系统中检测到以下可能的安装用户: ${NC}"
+    echo -e "${GREEN} -> [ ${detected_users} ] ${NC}"
+    echo -e "${YELLOW}=================================================${NC}"
+    
+    # 交互式询问用户，默认使用传入的参数或 admin
+    local default_u=${APP_USER:-admin}
+    read -p "请输入要卸载的用户名 [默认: $default_u]: " input_user < /dev/tty
+    target_user=${input_user:-$default_u}
+    
+    target_home=$(eval echo ~$target_user 2>/dev/null || echo "/home/$target_user")
+
     if [[ "$mode" == "--purge" ]]; then
-        # [修改] 移除交互式输入，直接使用脚本变量或默认为 admin
-        target_user=${APP_USER:-admin}
-        target_home=$(eval echo ~$target_user 2>/dev/null || echo "/home/$target_user")
-        log_warn "自动清理用户 $target_user 位于 $target_home 下的配置文件。"
+        log_warn "将清理用户 $target_user 位于 $target_home 下的配置文件。"
+    else
+        log_info "仅卸载服务，保留用户 $target_user 的数据。"
     fi
 
     read -p "确认要卸载所有组件吗？此操作不可逆！ [y/n]: " confirm < /dev/tty
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then exit 0; fi
 
     log_info "1. 停止并移除服务..."
+    # 查找并停止所有 qbittorrent 服务
     for svc in $(systemctl list-units --full -all | grep "qbittorrent-nox@" | awk '{print $1}'); do
         systemctl stop "$svc" 2>/dev/null || true
         systemctl disable "$svc" 2>/dev/null || true
@@ -236,7 +253,7 @@ uninstall() {
         sed -i '/# Auto-Seedbox-PT/d' /etc/security/limits.conf || true
     fi
     
-    # 移除防火墙规则 (尽力而为)
+    # 移除防火墙规则
     if command -v iptables >/dev/null; then
         iptables -D INPUT -p tcp --dport $QB_WEB_PORT -j ACCEPT 2>/dev/null || true
         iptables -D INPUT -p tcp --dport $QB_BT_PORT -j ACCEPT 2>/dev/null || true
@@ -467,17 +484,25 @@ install_apps() {
             while [ ! -d "$HB/vertex/data/rule" ] && [ $count -lt 30 ]; do
                 echo -n "."
                 sleep 1
-                # [修改] 使用标准算术运算，防止在 set -e 下因结果为 0 导致退出
                 count=$((count + 1))
             done
             echo ""
+            
+            log_info "补全核心目录结构..."
+            mkdir -p "$HB/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
+            mkdir -p "$HB/vertex/data/douban/set" "$HB/vertex/data/watch/set"
+            mkdir -p "$HB/vertex/data/rule/"{delete,link,rss,race,raceSet}
+            
+            log_info "修正目录权限..."
+            chown -R "$APP_USER:$APP_USER" "$HB/vertex"
+            chmod -R 777 "$HB/vertex/data"
+            
             docker stop vertex >/dev/null 2>&1 || true
         else
             log_info "智能修正备份中的下载器配置..."
             docker stop vertex >/dev/null 2>&1 || true
             local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
             
-            # [修改] 开启 nullglob 避免没有文件时报错导致 set -e 退出
             shopt -s nullglob
             local client_files=("$HB/vertex/data/client/"*.json)
             if [ ${#client_files[@]} -gt 0 ]; then
@@ -513,7 +538,7 @@ install_apps() {
 EOF
         fi
         
-        chown "$APP_USER:$APP_USER" "$HB/vertex"
+        chown -R "$APP_USER:$APP_USER" "$HB/vertex"
 
         log_info "重启 Vertex 服务..."
         docker start vertex
@@ -536,14 +561,30 @@ EOF
 
 # ================= 6. 入口主流程 =================
 
-case "${1:-}" in
-    --uninstall) uninstall "";;
-    --purge) uninstall "--purge";;
-esac
-
-while getopts "u:p:c:q:vftod:k:" opt; do
-    case $opt in u) APP_USER=$OPTARG ;; p) APP_PASS=$OPTARG ;; c) QB_CACHE=$OPTARG ;; q) QB_VER_REQ=$OPTARG ;; v) DO_VX=true ;; f) DO_FB=true ;; t) DO_TUNE=true ;; o) CUSTOM_PORT=true ;; d) VX_RESTORE_URL=$OPTARG ;; k) VX_ZIP_PASS=$OPTARG ;; esac
+while [[ $# -gt 0 ]]; do
+    key="$1"
+    case $key in
+        --uninstall) ACTION="uninstall"; shift ;;
+        --purge) ACTION="purge"; shift ;;
+        -u|--user) APP_USER="$2"; shift 2 ;;
+        -p|--pass) APP_PASS="$2"; shift 2 ;;
+        -c|--cache) QB_CACHE="$2"; shift 2 ;;
+        -q|--qbit) QB_VER_REQ="$2"; shift 2 ;;
+        -v|--vertex) DO_VX=true; shift ;;
+        -f|--filebrowser) DO_FB=true; shift ;;
+        -t|--tune) DO_TUNE=true; shift ;;
+        -o|--custom-port) CUSTOM_PORT=true; shift ;;
+        -d|--data) VX_RESTORE_URL="$2"; shift 2 ;;
+        -k|--key) VX_ZIP_PASS="$2"; shift 2 ;;
+        *) shift ;;
+    esac
 done
+
+if [[ "$ACTION" == "uninstall" ]]; then
+    uninstall ""
+elif [[ "$ACTION" == "purge" ]]; then
+    uninstall "--purge"
+fi
 
 check_root
 if [[ -z "$APP_USER" ]]; then APP_USER="admin"; fi
@@ -551,7 +592,6 @@ if [[ -n "$APP_PASS" ]]; then validate_pass "$APP_PASS"; fi
 
 print_banner "环境初始化"
 wait_for_lock; export DEBIAN_FRONTEND=noninteractive
-# 🟢 安装基础依赖 (含防火墙和 Python 支持)
 apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool iptables >/dev/null
 
 if [[ -z "$APP_PASS" ]]; then
@@ -604,5 +644,5 @@ echo -e "BT 端口 : ${YELLOW}$QB_BT_PORT${NC} (TCP/UDP)"
 echo -e "${BLUE}========================================================${NC}"
 
 [[ "$DO_TUNE" == "true" ]] && echo -e "${YELLOW}提示: 智能系统优化已生效。${NC}"
-warn "建议重启系统以确保所有优化生效 (命令: reboot)"
+log_warn "建议重启系统以确保所有优化生效 (命令: reboot)"
 echo ""
