@@ -40,9 +40,10 @@ VX_ZIP_PASS=""
 INSTALLED_MAJOR_VER="4"
 
 TEMP_DIR=$(mktemp -d); trap 'rm -rf "$TEMP_DIR"' EXIT
-# 默认备用源
-URL_V4_AMD64="https://github.com/userdocs/qbittorrent-nox-static/releases/download/release-4.3.9_v1.2.15/x86_64-qbittorrent-nox"
-URL_V4_ARM64="https://github.com/userdocs/qbittorrent-nox-static/releases/download/release-4.3.9_v1.2.15/aarch64-qbittorrent-nox"
+
+# [关键修改] 替换为用户指定的特殊优化版源
+URL_V4_AMD64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent-4.3.9/x86_64/qBittorrent-4.3.9%20-%20libtorrent-v1.2.20/qbittorrent-nox"
+URL_V4_ARM64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent-4.3.9/ARM64/qBittorrent-4.3.9%20-%20libtorrent-v1.2.20/qbittorrent-nox"
 
 # ================= 1. 核心工具函数 =================
 
@@ -119,10 +120,18 @@ install_qbit() {
     print_banner "正在安装 qBittorrent"
     local hb="/root"; local url=""; local arch=$(uname -m)
     
-    # [修复] 增强的 -q 版本选择逻辑
     if [[ "$QB_VER_REQ" == "4" || "$QB_VER_REQ" == "4.3.9" ]]; then
-        log_info "版本策略: 锁定 4.3.9 (Static)"
-        [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
+        log_info "版本策略: 锁定 4.3.9 (Special Optimized)"
+        # [关键逻辑] 区分架构下载对应的优化版
+        if [[ "$arch" == "x86_64" ]]; then
+            url="$URL_V4_AMD64"
+            log_info "检测到 x86_64 架构，使用专用优化版。"
+        elif [[ "$arch" == "aarch64" ]]; then
+            url="$URL_V4_ARM64"
+            log_info "检测到 ARM64 架构，使用专用优化版。"
+        else
+            log_err "不支持的架构: $arch"
+        fi
         INSTALLED_MAJOR_VER="4"
     else
         log_info "版本策略: 搜索 [$QB_VER_REQ] ..."
@@ -132,16 +141,16 @@ install_qbit() {
         if [[ "$QB_VER_REQ" == "latest" ]]; then
             tag=$(curl -sL "${api}/latest" | jq -r .tag_name)
         else
-            # 模糊搜索匹配的 tag
             tag=$(curl -sL "$api" | jq -r --arg v "$QB_VER_REQ" '.[].tag_name | select(contains($v))' | head -n 1)
         fi
 
         if [[ -z "$tag" || "$tag" == "null" ]]; then
-            log_warn "未找到版本 [$QB_VER_REQ]，回退至默认 4.3.9"
+            log_warn "未找到版本 [$QB_VER_REQ]，回退至默认 4.3.9 (优化版)"
             [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
             INSTALLED_MAJOR_VER="4"
         else
             log_info "已定位版本: $tag"
+            # 注意: 这里是非 4.3.9 版本，使用官方静态编译源
             local fname="${arch}-qbittorrent-nox"
             [[ "$arch" == "x86_64" ]] && fname="x86_64-qbittorrent-nox"
             [[ "$arch" == "aarch64" ]] && fname="aarch64-qbittorrent-nox"
@@ -230,16 +239,13 @@ install_apps() {
         print_banner "正在部署 Vertex"
         mkdir -p "$hb/vertex/data"
         
-        # [修复] Vertex 数据恢复逻辑 (-d / -k)
         if [[ -n "$VX_RESTORE_URL" ]]; then
             log_info "正在下载备份: $VX_RESTORE_URL"
             wget -q -O "$TEMP_DIR/vertex_backup.zip" "$VX_RESTORE_URL" || log_warn "备份下载失败，将安装纯净版"
-            
             if [[ -f "$TEMP_DIR/vertex_backup.zip" ]]; then
                 log_info "正在解压备份..."
                 local unzip_cmd="unzip -o"
                 [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P $VX_ZIP_PASS"
-                
                 if $unzip_cmd "$TEMP_DIR/vertex_backup.zip" -d "$hb/vertex/"; then
                     log_info "✅ 备份恢复成功"
                 else
@@ -249,7 +255,6 @@ install_apps() {
         fi
 
         log_info "同步 Web 账号密码..."
-        # 即使恢复了备份，也强制覆盖 setting.json 以确保密码与参数一致 (用户体验优先)
         local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
         cat > "$hb/vertex/data/setting.json" << EOF
 {
@@ -300,7 +305,6 @@ EOF
 if [[ "${1:-}" == "--uninstall" ]]; then uninstall ""; fi
 if [[ "${1:-}" == "--purge" ]]; then uninstall "--purge"; fi
 
-# [修复] 补全 getopts 字符串，确保 d, k, o, q 等参数能被正确识别
 while getopts "u:p:c:q:vftod:k:" opt; do
     case $opt in 
         u) APP_USER=$OPTARG ;; 
@@ -345,7 +349,7 @@ PUB_IP=$(curl -s --max-time 3 https://api.ipify.org || echo "ServerIP")
 
 echo ""
 echo -e "${BLUE}########################################################${NC}"
-echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V2.8)             ${NC}"
+echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V2.9)             ${NC}"
 echo -e "${BLUE}########################################################${NC}"
 echo -e "Web 账号: ${YELLOW}$APP_USER${NC}"
 echo -e "Web 密码: ${YELLOW}(您刚才输入的密码)${NC}"
