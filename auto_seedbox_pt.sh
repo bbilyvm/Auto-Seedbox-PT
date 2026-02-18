@@ -1,20 +1,9 @@
 #!/bin/bash
 
 ################################################################################
-# Auto-Seedbox-PT (ASP) v1.0 
+# Auto-Seedbox-PT (ASP) v1.1 
 # qBittorrent  + libtorrent  + Vertex + FileBrowser 一键安装脚本
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
-# 参数说明:
-#   -u : 用户名
-#   -p : 密码（必须 ≥ 8 位）
-#   -c : qBittorrent 缓存大小 (MiB)
-#   -q : qBittorrent 版本 (4.3.9)
-#   -v : 安装 Vertex
-#   -f : 安装 FileBrowser
-#   -t : 启用系统内核优化（强烈推荐）
-#   -o : 自定义端口 (会提示输入)
-#   -d : Vertex data 目录 ZIP 下载链接 (可选)
-#   -k : Vertex data ZIP 解压密码 (可选)
 ################################################################################
 
 set -euo pipefail
@@ -248,7 +237,7 @@ Session\DefaultSavePath=$hb/Downloads/
 Session\AsyncIOThreadsCount=$threads_val
 [Preferences]
 Connection\PortRangeMin=$QB_BT_PORT
-Downloads\DiskWriteCacheSize=$cache_val
+Downloads\DiskWriteCacheSize=$QB_CACHE
 WebUI\Password_PBKDF2="$pass_hash"
 WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$APP_USER
@@ -283,7 +272,6 @@ install_apps() {
     print_banner "部署 Docker 及应用"
     wait_for_lock
     
-    # 彻底清除冲突包名
     apt-get remove --purge containerd.io containerd docker-ce docker-ce-cli -y >/dev/null 2>&1 || true
     
     if ! apt-get -qq install docker.io -y >/dev/null 2>&1; then
@@ -296,53 +284,52 @@ install_apps() {
     local hb="/root"
     if [[ "$DO_VX" == "true" ]]; then
         print_banner "部署 Vertex (Smart-Polling)"
-        # 🟢 关键权限修复：创建目录并直接赋予 777
-        mkdir -p "$hb/vertex/data"
-        chmod -R 777 "$hb/vertex"
         
-        docker rm -f vertex &>/dev/null || true
-        log_info "启动 Vertex 容器..."
-        docker run -d --name vertex -p $VX_PORT:3000 -v "$hb/vertex":/vertex -e TZ=Asia/Shanghai lswl/vertex:stable
+        # 🟢 预先创建全量目录树
+        mkdir -p "$hb/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
+        mkdir -p "$hb/vertex/data/douban/set" "$hb/vertex/data/watch/set"
+        mkdir -p "$hb/vertex/data/rule/"{delete,link,rss,race,raceSet}
         
-        log_info "正在监控内部结构生成..."
-        local wait_count=0
-        while true; do
-            if [[ -f "$hb/vertex/data/setting.json" ]] && [[ -d "$hb/vertex/data/rule" ]]; then
-                log_info "Vertex 原生结构初始化成功。"
-                break
-            fi
-            sleep 1; wait_count=$((wait_count+1))
-            if [[ $wait_count -ge 60 ]]; then 
-                log_warn "初始化检测超时，强制介入补全核心目录..."
-                mkdir -p "$hb/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
-                mkdir -p "$hb/vertex/data/douban/set" "$hb/vertex/data/watch/set"
-                chmod -R 777 "$hb/vertex/data"
-                break
-            fi
-        done
-        
-        docker stop vertex || true
-        
+        # 🟢 数据恢复逻辑 (ZIP)
         if [[ -n "$VX_RESTORE_URL" ]]; then
+            log_info "执行数据恢复流程..."
             download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.zip"
             local unzip_cmd="unzip -o"
             [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P\"$VX_ZIP_PASS\""
             eval "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$hb/vertex/\"" || true
         fi
-        
+
+        # 🟢 配置预注入
         local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
         local set_file="$hb/vertex/data/setting.json"
+        
         if [[ -f "$set_file" ]]; then
-            log_info "注入 Vertex 配置..."
+            log_info "同步现有配置: $set_file"
             jq --arg u "$APP_USER" --arg p "$vx_pass_md5" --argjson pt 3000 \
-               '.username = $u | .password = $p | .port = $pt' "$set_file" > "${set_file}.tmp" && \
-               mv "${set_file}.tmp" "$set_file"
+                '.username = $u | .password = $p | .port = $pt' "$set_file" > "${set_file}.tmp" && \
+                mv "${set_file}.tmp" "$set_file"
         else
+            log_info "创建初始配置..."
             cat > "$set_file" << EOF
-{ "username": "$APP_USER", "password": "$vx_pass_md5", "port": 3000 }
+{
+  "username": "$APP_USER",
+  "password": "$vx_pass_md5",
+  "port": 3000
+}
 EOF
         fi
-        docker start vertex || true
+
+        chmod -R 777 "$hb/vertex"
+        
+        docker rm -f vertex &>/dev/null || true
+        log_info "启动 Vertex 容器..."
+        docker run -d --name vertex \
+            --restart unless-stopped \
+            -p $VX_PORT:3000 \
+            -v "$hb/vertex":/vertex \
+            -e TZ=Asia/Shanghai \
+            lswl/vertex:stable
+        
         open_port "$VX_PORT"
     fi
 
@@ -396,21 +383,33 @@ install_qbit
 
 PUB_IP=$(curl -s --max-time 5 https://api.ipify.org || echo "ServerIP")
 
+# 🟢 强化输出逻辑：恢复 Docker 内网信息和账号块
 echo ""
 echo -e "${GREEN}########################################################${NC}"
-echo -e "${GREEN}          Auto-Seedbox-PT 安装成功!                    ${NC}"
+echo -e "${GREEN}           Auto-Seedbox-PT 安装成功!                    ${NC}"
 echo -e "${GREEN}########################################################${NC}"
-echo -e "Web 账号: ${YELLOW}$APP_USER${NC}"
-echo -e "Web 密码: ${YELLOW}(您设定的密码)${NC}"
-echo -e "BT 端口 : ${YELLOW}$QB_BT_PORT${NC} (TCP/UDP)"
-echo -e "${BLUE}--------------------------------------------------------${NC}"
+
 echo -e "🧩 qBittorrent: ${GREEN}http://$PUB_IP:$QB_WEB_PORT${NC}"
+
 if [[ "$DO_VX" == "true" ]]; then
-    echo -e "🌐 Vertex:      ${GREEN}http://$PUB_IP:$VX_PORT${NC} (Bridge模式)"
-    echo -e "   └─ 提示: 下载器地址请填 ${YELLOW}172.17.0.1:$QB_WEB_PORT${NC}"
+    VX_IN_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' vertex 2>/dev/null || echo "Unknown")
+    VX_GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
+    echo -e "🌐 Vertex:      ${GREEN}http://$PUB_IP:$VX_PORT${NC}"
+    echo -e "    └─ Docker 内网: ${BLUE}$VX_IN_IP:3000${NC}"
+    echo -e "    └─ 内网连接qBit: ${YELLOW}$VX_GW:$QB_WEB_PORT${NC}"
 fi
+
 if [[ "$DO_FB" == "true" ]]; then
     echo -e "📁 FileBrowser: ${GREEN}http://$PUB_IP:$FB_PORT${NC}"
 fi
+
+echo -e "${BLUE}--------------------------------------------------------${NC}"
+echo -e "🔐 ${GREEN}账号信息${NC}"
+echo -e "用户名: ${YELLOW}$APP_USER${NC}"
+echo -e "密  码: ${YELLOW}$APP_PASS${NC}"
+echo -e "BT 端口: ${YELLOW}$QB_BT_PORT${NC} (TCP/UDP)"
 echo -e "${BLUE}========================================================${NC}"
+
 [[ "$DO_TUNE" == "true" ]] && echo -e "${YELLOW}提示: 深度持久化优化已生效。${NC}"
+warn "建议重启系统以确保所有优化生效 (命令: reboot)"
+echo ""
