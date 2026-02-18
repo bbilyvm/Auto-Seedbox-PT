@@ -90,7 +90,50 @@ get_input_port() {
     done
 }
 
-# ================= 2. 系统优化逻辑 (-t) =================
+# ================= 2. 卸载逻辑 =================
+
+uninstall() {
+    local mode=$1
+    echo -e "${YELLOW}========================================${NC}"
+    echo -e "${YELLOW}      Auto-Seedbox-PT 卸载程序          ${NC}"
+    echo -e "${YELLOW}========================================${NC}"
+    
+    read -p "确认要卸载所有组件吗？[y/n]: " confirm < /dev/tty
+    [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 0
+
+    log_info "停止原生系统服务..."
+    systemctl stop "qbittorrent-nox@root" 2>/dev/null || true
+    systemctl disable "qbittorrent-nox@root" 2>/dev/null || true
+    rm -f /etc/systemd/system/qbittorrent-nox@.service /usr/bin/qbittorrent-nox
+    
+    log_info "停止并删除 Docker 容器..."
+    if command -v docker >/dev/null; then
+        docker rm -f vertex filebrowser 2>/dev/null || true
+    fi
+
+    log_info "移除系统优化设置..."
+    systemctl stop asp-tune.service 2>/dev/null || true
+    systemctl disable asp-tune.service 2>/dev/null || true
+    rm -f /etc/systemd/system/asp-tune.service /usr/local/bin/asp-tune.sh /etc/sysctl.d/99-ptbox.conf
+    systemctl daemon-reload
+    sysctl --system >/dev/null 2>&1
+
+    if [[ "$mode" == "--purge" ]]; then
+        log_warn "执行深度清理 (配置与数据库)..."
+        rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/fb.db"
+        
+        echo -e "${RED}是否删除下载目录 (/root/Downloads)? 数据无价！${NC}"
+        read -p "确认删除吗？[y/n]: " del_dl < /dev/tty
+        if [[ "$del_dl" =~ ^[Yy]$ ]]; then
+            rm -rf "/root/Downloads"
+            log_warn "下载目录已删除。"
+        fi
+    fi
+    log_info "卸载完成！"
+    exit 0
+}
+
+# ================= 3. 系统持久化优化 (-t) =================
 
 optimize_system() {
     print_banner "配置系统优化 (持久化)"
@@ -150,7 +193,7 @@ EOF
     systemctl start asp-tune.service
 }
 
-# ================= 3. 应用安装逻辑 =================
+# ================= 4. 应用安装逻辑 =================
 
 install_qbit() {
     print_banner "安装 qBittorrent"
@@ -216,20 +259,17 @@ install_apps() {
         print_banner "部署 Vertex (Bridge模式)"
         mkdir -p "$hb/vertex/data" && chmod -R 777 "$hb/vertex"
         docker rm -f vertex &>/dev/null || true
-        log_info "启动 Vertex 容器..."
+        log_info "启动 Vertex 容器并轮询检测..."
         docker run -d --name vertex -p $VX_PORT:3000 -v "$hb/vertex":/vertex -e TZ=Asia/Shanghai lswl/vertex:stable >/dev/null
         
-        # ⚡ 智能轮询检测：监测文件及核心目录生成情况
-        log_info "等待 Vertex 内部结构就绪 (智能轮询)..."
         local wait_count=0
         while true; do
-            # 检测核心配置 + 关键目录（如 rule）的存在性，意味着 VT 已完成首轮初始化
             if [[ -f "$hb/vertex/data/setting.json" ]] && [[ -d "$hb/vertex/data/rule" ]]; then
-                log_info "检测到结构已就绪，正在切入配置..."
+                log_info "检测到原生结构已就绪。"
                 break
             fi
             sleep 1; wait_count=$((wait_count+1))
-            [[ $wait_count -ge 60 ]] && (log_warn "轮询超时，尝试强制继续..."; break)
+            [[ $wait_count -ge 60 ]] && break
         done
         
         docker stop vertex >/dev/null
@@ -257,17 +297,20 @@ EOF
     fi
 }
 
-# ================= 4. 入口与结果展示 =================
+# ================= 5. 入口主流程 =================
 
-if [[ "${1:-}" == "--uninstall" ]]; then uninstall ""; fi
-if [[ "${1:-}" == "--purge" ]]; then uninstall "--purge"; fi
+# 参数预判，处理卸载逻辑
+case "${1:-}" in
+    --uninstall) uninstall "";;
+    --purge) uninstall "--purge";;
+esac
 
 while getopts "u:p:c:q:vftod:k:" opt; do
     case $opt in u) APP_USER=$OPTARG ;; p) APP_PASS=$OPTARG ;; c) QB_CACHE=$OPTARG ;; q) QB_VER_REQ=$OPTARG ;; v) DO_VX=true ;; f) DO_FB=true ;; t) DO_TUNE=true ;; o) CUSTOM_PORT=true ;; d) VX_RESTORE_URL=$OPTARG ;; k) VX_ZIP_PASS=$OPTARG ;; esac
 done
 
 check_root
-print_banner "初始化安装环境"
+print_banner "环境初始化"
 wait_for_lock; export DEBIAN_FRONTEND=noninteractive; apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
 
 [[ -z "$APP_PASS" ]] && (echo -n "请输入 Web 面板密码 (至少12位): "; read -s APP_PASS < /dev/tty; echo "")
@@ -306,4 +349,4 @@ if [[ "$DO_FB" == "true" ]]; then
 fi
 echo -e "${BLUE}========================================================${NC}"
 [[ "$DO_TUNE" == "true" ]] && echo -e "${YELLOW}提示: 深度持久化优化已应用，重启不失效。${NC}"
-echo -e "${RED}[注意] 如果无法访问端口，请检查云服务商网页端的安全组设置！${NC}"
+echo -e "${RED}[注意] 请确保云服务器安全组已放行相关端口！${NC}"
