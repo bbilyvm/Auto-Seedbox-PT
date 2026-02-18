@@ -17,45 +17,6 @@
 #   -k : Vertex data ZIP 解压密码 (可选)
 ################################################################################
 
-您非常敏锐！这正是我在从 V1.x 重构到 V2.3 时遗漏的一个关键细节。
-
-qBittorrent v4 (基于 libtorrent 1.x) 和 v5 (基于 libtorrent 2.x) 的核心存储机制完全不同：
-
-v4：高度依赖软件自身的内存缓存 (DiskWriteCacheSize) 和 异步 I/O 线程。
-
-v5：使用 内存映射 (Memory Mapped I/O)，应该禁用软件缓存 (DiskWriteCacheSize=-1)，转而让 Linux 内核（通过 PageCache）来管理内存。
-
-在 V2.3 中，我虽然做了内核级的 sysctl 优化，但 qBittorrent 的配置文件 (qBittorrent.conf) 没有针对 v5 做区分。
-
-为了达到您要求的“完美”，必须补上这个逻辑。
-
-🚀 Auto-Seedbox-PT (ASP) v2.4 - 双核深度优化版
-本次更新 (V2.4) 的核心升级：
-
-v4/v5 智能分流：
-
-v4 模式：启用应用层缓存 (-c 参数生效)，根据 SSD/HDD 自动计算 I/O 线程数。
-
-v5 模式：强制关闭应用层缓存 (DiskWriteCacheSize=-1)，将内存管理权交给我们在 sys_tune 中优化过的 Linux 内核，这是 v5 跑满带宽的关键。
-
-磁盘类型检测：在生成配置时自动检测是 SSD 还是 HDD，分别设置不同的线程策略。
-
-请使用此版本覆盖 GitHub：
-
-Bash
-#!/bin/bash
-
-################################################################################
-# Auto-Seedbox-PT (ASP) v2.4 - 双核深度优化版
-# 
-# [V2.4 升级日志]
-# 1. v4/v5 差异化配置：
-#    - v4: 使用 RAM Cache + 多线程 I/O (适合 Libtorrent 1.x)
-#    - v5: 使用 OS PageCache (MMap) + 禁用应用缓存 (适合 Libtorrent 2.x)
-# 2. 硬件感知：根据 SSD/HDD 自动调整 v4 的 AsyncIO 线程数。
-# 3. 继承 V2.3 所有特性：锁等待、Docker 重试、自动防火墙、Root 独享。
-################################################################################
-
 set -euo pipefail
 IFS=$'\n\t'
 
@@ -207,9 +168,7 @@ install_qbit() {
         
         # 简单的磁盘类型检测 (SSD vs HDD)
         local root_disk=$(df /root | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//;s/\/dev\///')
-        # 尝试查找物理设备名
         local rot_path="/sys/block/$root_disk/queue/rotational"
-        # 如果是 LVM 或其他情况找不到，尝试 lsblk
         if [ ! -f "$rot_path" ]; then
              root_disk=$(lsblk -nd -o NAME | head -1)
              rot_path="/sys/block/$root_disk/queue/rotational"
@@ -351,6 +310,7 @@ while getopts "u:p:c:q:vfto" opt; do
         u) APP_USER=$OPTARG ;; 
         p) APP_PASS=$OPTARG ;; 
         c) QB_CACHE=$OPTARG ;;
+        q) QB_VER_REQ=$OPTARG ;;
         v) DO_VX=true ;; f) DO_FB=true ;; t) DO_TUNE=true ;; o) CUSTOM_PORT=true ;;
     esac
 done
