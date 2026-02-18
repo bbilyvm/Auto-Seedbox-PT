@@ -20,18 +20,20 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# ================= 0. 全局变量 =================
+# ================= 0. 全局变量与配色 =================
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
 BLUE='\033[0;36m'
-NC='\033[0m'
+NC='\033[0m' # No Color
 
+# 默认端口
 QB_WEB_PORT=8080
 QB_BT_PORT=20000
 VX_PORT=3000
 FB_PORT=8081
 
+# 参数默认值
 APP_USER="admin"
 APP_PASS=""
 QB_CACHE=1024
@@ -50,7 +52,7 @@ TEMP_DIR=$(mktemp -d); trap 'rm -rf "$TEMP_DIR"' EXIT
 URL_V4_AMD64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent-4.3.9/x86_64/qBittorrent-4.3.9%20-%20libtorrent-v1.2.20/qbittorrent-nox"
 URL_V4_ARM64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent-4.3.9/ARM64/qBittorrent-4.3.9%20-%20libtorrent-v1.2.20/qbittorrent-nox"
 
-# ================= 1. 工具函数 =================
+# ================= 1. 核心工具函数 =================
 
 log_info() { echo -e "${GREEN}[INFO] $1${NC}" >&2; }
 log_warn() { echo -e "${YELLOW}[WARN] $1${NC}" >&2; }
@@ -94,80 +96,46 @@ get_input_port() {
     done
 }
 
-# ================= 2. 核心安装逻辑 =================
+# ================= 2. 卸载逻辑 =================
 
 uninstall() {
     echo -e "${YELLOW}========================================${NC}"
     echo -e "${YELLOW}      Auto-Seedbox-PT 卸载程序          ${NC}"
     echo -e "${YELLOW}========================================${NC}"
-    
-    read -p "警告：将停止服务并删除配置。确定继续吗？[y/N]: " confirm < /dev/tty
+    read -p "警告：将停止服务并删除配置。确定继续吗？[y/n]: " confirm < /dev/tty
     [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 0
-    
     log_info "正在停止服务..."
     systemctl stop "qbittorrent-nox@root" 2>/dev/null || true
     systemctl disable "qbittorrent-nox@root" 2>/dev/null || true
     rm -f /etc/systemd/system/qbittorrent-nox@.service /usr/bin/qbittorrent-nox
-    
-    # 卸载优化服务
     log_info "卸载优化服务..."
     systemctl stop asp-tune.service 2>/dev/null || true
     systemctl disable asp-tune.service 2>/dev/null || true
-    rm -f /etc/systemd/system/asp-tune.service /usr/local/bin/asp-tune.sh
-    rm -f /etc/sysctl.d/99-ptbox.conf
-    
+    rm -f /etc/systemd/system/asp-tune.service /usr/local/bin/asp-tune.sh /etc/sysctl.d/99-ptbox.conf
     systemctl daemon-reload
-    
     if command -v docker >/dev/null; then 
         log_info "正在删除容器..."
         docker rm -f vertex filebrowser 2>/dev/null || true
     fi
-
     if [[ "${1:-}" == "--purge" ]]; then
         log_warn "正在执行深度清理 (配置与数据库)..."
         rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/fb.db"
-        
         echo -e "${RED}是否删除下载目录 (/root/Downloads)? 数据无价，请慎重！${NC}"
-        read -p "确认删除吗？[y/N]: " del_dl < /dev/tty
-        
-        if [[ "$del_dl" =~ ^[Yy]$ ]]; then
-            rm -rf "/root/Downloads"
-            log_warn "下载目录已删除。"
-        else
-            log_info "保留下载目录。"
-        fi
+        read -p "确认删除吗？[y/n]: " del_dl < /dev/tty
+        if [[ "$del_dl" =~ ^[Yy]$ ]]; then rm -rf "/root/Downloads"; log_warn "下载目录已删除。"; else log_info "保留下载目录。"; fi
     fi
     log_info "卸载完成。"
     exit 0
 }
 
-install_docker_env() {
-    if command -v docker >/dev/null; then return 0; fi
-    print_banner "安装 Docker 环境"
-    local retries=3; local count=0
-    until [ $count -ge $retries ]; do
-        wait_for_lock
-        if curl -fsSL https://get.docker.com | bash; then return 0; fi
-        count=$((count+1)); log_warn "安装失败，重试中 ($count/$retries)..."; sleep 5
-    done
-    log_err "Docker 安装失败，请检查网络。"
-}
-
-# ================= 3. 持久化系统优化 (重点) =================
+# ================= 3. 系统持久化优化 (-t) =================
 
 optimize_system() {
     print_banner "配置系统优化 (持久化)"
-    
-    # 1. 静态参数 (sysctl) - 写入文件永久生效
     log_info "应用内核参数 (sysctl)..."
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local rmem_max=$((mem_kb * 1024 / 2))
-    [[ $rmem_max -gt 134217728 ]] && rmem_max=134217728
-    
-    # 动态计算 TCP 内存限制
-    local tcp_mem_min=$((mem_kb / 16))
-    local tcp_mem_def=$((mem_kb / 8))
-    local tcp_mem_max=$((mem_kb / 4))
+    local rmem_max=$((mem_kb * 1024 / 2)); [[ $rmem_max -gt 134217728 ]] && rmem_max=134217728
+    local tcp_mem_min=$((mem_kb / 16)); local tcp_mem_def=$((mem_kb / 8)); local tcp_mem_max=$((mem_kb / 4))
 
     cat > /etc/sysctl.d/99-ptbox.conf << EOF
 fs.file-max = 1048576
@@ -187,71 +155,42 @@ net.ipv4.tcp_mem = $tcp_mem_min $tcp_mem_def $tcp_mem_max
 net.ipv4.tcp_window_scaling = 1
 net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
-net.ipv4.tcp_no_metrics_save = 1
 EOF
     sysctl --system >/dev/null 2>&1
 
-    # 2. 动态参数 (Disk & Network) - 创建开机启动脚本
     log_info "创建开机优化脚本 (/usr/local/bin/asp-tune.sh)..."
     cat > /usr/local/bin/asp-tune.sh << 'EOF_SCRIPT'
 #!/bin/bash
-# Auto-Seedbox-PT Boot Optimizer
-
-# 1. 优化磁盘调度器
 for disk in $(lsblk -nd --output NAME | grep -v '^md' | grep -v '^loop'); do
     queue_path="/sys/block/$disk/queue"
     if [ -f "$queue_path/scheduler" ]; then
         rot=$(cat "$queue_path/rotational")
-        if [ "$rot" == "0" ]; then
-            # SSD
-            echo "mq-deadline" > "$queue_path/scheduler" 2>/dev/null || echo "none" > "$queue_path/scheduler" 2>/dev/null
-        else
-            # HDD
-            echo "bfq" > "$queue_path/scheduler" 2>/dev/null || echo "mq-deadline" > "$queue_path/scheduler" 2>/dev/null
-        fi
-        # 增加预读 (Read Ahead)
+        [[ "$rot" == "0" ]] && (echo "mq-deadline" > "$queue_path/scheduler" 2>/dev/null || echo "none" > "$queue_path/scheduler" 2>/dev/null) \
+                           || (echo "bfq" > "$queue_path/scheduler" 2>/dev/null || echo "mq-deadline" > "$queue_path/scheduler" 2>/dev/null)
         blockdev --setra 4096 "/dev/$disk" 2>/dev/null
     fi
 done
-
-# 2. 优化网卡队列
-# 自动检测默认路由网卡
 ETH=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
 if [ -n "$ETH" ]; then
-    # 增加发送队列长度
     ifconfig "$ETH" txqueuelen 10000 2>/dev/null
-    # 增加环形缓冲区 (Ring Buffer) 到硬件最大值
     ethtool -G "$ETH" rx 4096 tx 4096 2>/dev/null || true
 fi
-
-# 3. 提升文件描述符软限制
 ulimit -n 1048576
 EOF_SCRIPT
-
     chmod +x /usr/local/bin/asp-tune.sh
 
-    # 3. 注册 Systemd 服务
-    log_info "注册 Systemd 开机服务 (asp-tune.service)..."
     cat > /etc/systemd/system/asp-tune.service << EOF
 [Unit]
 Description=Auto-Seedbox-PT System Tuning
 After=network-online.target
-Wants=network-online.target
-
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/asp-tune.sh
 RemainAfterExit=yes
-
 [Install]
 WantedBy=multi-user.target
 EOF
-
-    systemctl daemon-reload
-    systemctl enable asp-tune.service >/dev/null 2>&1
-    
-    # 4. 立即执行一次
-    log_info "立即应用优化..."
+    systemctl daemon-reload && systemctl enable asp-tune.service >/dev/null 2>&1
     systemctl start asp-tune.service
 }
 
@@ -259,59 +198,27 @@ EOF
 
 install_qbit() {
     print_banner "安装 qBittorrent"
-    local hb="/root"; local url=""; local arch=$(uname -m)
-    
+    local hb="/root"; local arch=$(uname -m); local url=""
     if [[ "$QB_VER_REQ" == "4" || "$QB_VER_REQ" == "4.3.9" ]]; then
-        log_info "版本策略: 锁定 4.3.9 (Special Optimized)"
         [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
         INSTALLED_MAJOR_VER="4"
     else
-        log_info "版本策略: 搜索 [$QB_VER_REQ] ..."
         local api="https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases"
-        local tag=""
-        if [[ "$QB_VER_REQ" == "latest" ]]; then
-            tag=$(curl -sL "${api}/latest" | jq -r .tag_name)
-        else
-            tag=$(curl -sL "$api" | jq -r --arg v "$QB_VER_REQ" '.[].tag_name | select(contains($v))' | head -n 1)
-        fi
-        
-        if [[ -z "$tag" || "$tag" == "null" ]]; then
-            log_warn "未找到版本 [$QB_VER_REQ]，回退至默认 4.3.9"
-            [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
-            INSTALLED_MAJOR_VER="4"
-        else
-            log_info "已定位版本: $tag"
-            local fname="${arch}-qbittorrent-nox"
-            [[ "$arch" == "x86_64" ]] && fname="x86_64-qbittorrent-nox"
-            [[ "$arch" == "aarch64" ]] && fname="aarch64-qbittorrent-nox"
-            url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${fname}"
-            if [[ "$tag" =~ release-5 ]]; then INSTALLED_MAJOR_VER="5"; else INSTALLED_MAJOR_VER="4"; fi
-        fi
+        local tag=$(curl -sL "$api" | jq -r --arg v "$QB_VER_REQ" 'if $v == "latest" then .[0].tag_name else .[].tag_name | select(contains($v)) end' | head -n 1)
+        local fname="${arch}-qbittorrent-nox"; [[ "$arch" == "x86_64" ]] && fname="x86_64-qbittorrent-nox"
+        url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${fname}"
+        [[ "$tag" =~ release-5 ]] && INSTALLED_MAJOR_VER="5" || INSTALLED_MAJOR_VER="4"
     fi
-
-    log_info "下载二进制文件..."
-    wget -q --show-progress -O /usr/bin/qbittorrent-nox "$url"
-    chmod +x /usr/bin/qbittorrent-nox
+    wget -q --show-progress -O /usr/bin/qbittorrent-nox "$url" && chmod +x /usr/bin/qbittorrent-nox
     mkdir -p "$hb/.config/qBittorrent" "$hb/Downloads"
-    
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; salt = os.urandom(16); dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), salt, 100000); print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})')" "$APP_PASS")
-
-    # 线程与缓存优化
     local threads_val="4"; local cache_val="$QB_CACHE"
-    if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
-        log_info "应用 v5 优化: 禁用应用层缓存 (DiskWriteCacheSize=-1)"
-        cache_val="-1"; threads_val="0"
+    if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then cache_val="-1"; threads_val="0"
     else
-        log_info "应用 v4 优化: 设置缓存 $QB_CACHE MiB"
         local root_disk=$(df /root | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//;s/\/dev\///')
-        local rot_path="/sys/block/$root_disk/queue/rotational"
-        if [ ! -f "$rot_path" ]; then root_disk=$(lsblk -nd -o NAME | head -1); rot_path="/sys/block/$root_disk/queue/rotational"; fi
-        if [[ -f "$rot_path" && "$(cat $rot_path)" == "0" ]]; then 
-            log_info "检测到 SSD 硬盘，启用高性能 I/O (16线程)"
-            threads_val="16"
-        fi
+        [[ -f "/sys/block/$root_disk/queue/rotational" && "$(cat /sys/block/$root_disk/queue/rotational)" == "0" ]] && threads_val="16"
     fi
-
+    # 写入配置，包含 WebUI 安全性放宽，便于 API 调用
     cat > "$hb/.config/qBittorrent/qBittorrent.conf" << EOF
 [BitTorrent]
 Session\DefaultSavePath=$hb/Downloads/
@@ -322,10 +229,12 @@ Downloads\DiskWriteCacheSize=$cache_val
 WebUI\Password_PBKDF2="$pass_hash"
 WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$APP_USER
-WebUI\AuthSubnetWhitelist=127.0.0.1/32, 172.16.0.0/12
+WebUI\AuthSubnetWhitelist=127.0.0.1/32, 172.16.0.0/12, 10.0.0.0/8, 192.168.0.0/16, 172.17.0.0/16
 WebUI\AuthSubnetWhitelistEnabled=true
+WebUI\HostHeaderValidation=false
+WebUI\CSRFProtection=false
+WebUI\HTTPS\Enabled=false
 EOF
-    
     cat > /etc/systemd/system/qbittorrent-nox@.service << EOF
 [Unit]
 Description=qBittorrent Service (Root)
@@ -346,114 +255,61 @@ EOF
 }
 
 install_apps() {
-    install_docker_env
+    wait_for_lock; apt-get -qq install docker.io -y >/dev/null 2>&1 || true
     local hb="/root"
-
     if [[ "$DO_VX" == "true" ]]; then
-        print_banner "正在部署 Vertex (Bridge模式)"
-        mkdir -p "$hb/vertex/data"
-        chmod -R 777 "$hb/vertex"
-        docker rm -f vertex &>/dev/null || true
-        
-        log_info "启动 Vertex 进行初始化..."
-        docker run -d --name vertex \
-            -p $VX_PORT:3000 \
-            -v "$hb/vertex":/vertex \
-            -e TZ=Asia/Shanghai \
-            lswl/vertex:stable >/dev/null
-            
-        log_info "智能检测初始化进度..."
-        local wait_count=0
-        while [ ! -f "$hb/vertex/data/setting.json" ]; do
-            sleep 1
-            wait_count=$((wait_count+1))
-            if [ $wait_count -ge 60 ]; then
-                log_warn "初始化超时，尝试继续..."
-                break
-            fi
-        done
-        
-        # 缓冲时间，等待子目录生成
-        log_info "配置已生成，等待 20s 确保目录结构完整..."
-        sleep 20
-        
-        docker stop vertex >/dev/null
-        
-        # 兜底创建所有目录
+        print_banner "部署 Vertex (极速模式)"
+        # 1. 主动创建全量目录 (彻底消除 ENOENT)
+        log_info "主动创建目录结构..."
         mkdir -p "$hb/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
         mkdir -p "$hb/vertex/data/rule/"{rss,link,race,delete}
-        chmod -R 777 "$hb/vertex/data"
+        chmod -R 777 "$hb/vertex"
         
-        if [[ -n "$VX_RESTORE_URL" ]]; then
-            log_info "恢复备份数据..."
-            wget -q -O "$TEMP_DIR/bk.zip" "$VX_RESTORE_URL"
-            if [[ -f "$TEMP_DIR/bk.zip" ]]; then
-                local unzip_cmd="unzip -o"
-                [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P $VX_ZIP_PASS"
-                $unzip_cmd "$TEMP_DIR/bk.zip" -d "$hb/vertex/" >/dev/null || log_warn "备份解压失败"
-            fi
-        fi
-
-        # 注入配置 (User/Pass + 强制Port 3000)
+        docker rm -f vertex &>/dev/null || true
+        log_info "秒级启动并轮询检测..."
+        docker run -d --name vertex -p $VX_PORT:3000 -v "$hb/vertex":/vertex -e TZ=Asia/Shanghai lswl/vertex:stable >/dev/null
+        
+        # 2. 极速轮询检测
+        local wait_count=0
+        while [ ! -f "$hb/vertex/data/setting.json" ]; do sleep 1; wait_count=$((wait_count+1)); [[ $wait_count -ge 60 ]] && break; done
+        
+        # 3. 配置注入
+        docker stop vertex >/dev/null
+        [[ -n "$VX_RESTORE_URL" ]] && (wget -q -O "$TEMP_DIR/bk.zip" "$VX_RESTORE_URL" && unzip -o ${VX_ZIP_PASS:+-P $VX_ZIP_PASS} "$TEMP_DIR/bk.zip" -d "$hb/vertex/" >/dev/null || true)
         local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
-        local set_file="$hb/vertex/data/setting.json"
-        
-        log_info "更新 Vertex 配置..."
-        if [ -f "$set_file" ]; then
-            jq --arg u "$APP_USER" --arg p "$vx_pass_md5" \
-               '.username = $u | .password = $p | .port = 3000' \
-               "$set_file" > "${set_file}.tmp" && mv "${set_file}.tmp" "$set_file"
+        if [ -f "$hb/vertex/data/setting.json" ]; then
+            jq --arg u "$APP_USER" --arg p "$vx_pass_md5" '.username = $u | .password = $p | .port = 3000' "$hb/vertex/data/setting.json" > "${hb}/vertex/data/setting.json.tmp" && mv "${hb}/vertex/data/setting.json.tmp" "$hb/vertex/data/setting.json"
         else
-            cat > "$set_file" << EOF
+            cat > "$hb/vertex/data/setting.json" << EOF
 { "username": "$APP_USER", "password": "$vx_pass_md5", "port": 3000 }
 EOF
         fi
-        
-        docker start vertex >/dev/null
-        open_port "$VX_PORT"
-        log_info "Vertex 部署完成，端口映射: $VX_PORT -> 3000"
+        docker start vertex >/dev/null; open_port "$VX_PORT"
     fi
 
     if [[ "$DO_FB" == "true" ]]; then
-        print_banner "正在部署 FileBrowser"
-        rm -rf "$hb/.config/filebrowser" "$hb/fb.db"
-        mkdir -p "$hb/.config/filebrowser" && touch "$hb/fb.db" && chmod 666 "$hb/fb.db"
-        
+        print_banner "部署 FileBrowser"
+        rm -rf "$hb/.config/filebrowser" "$hb/fb.db"; mkdir -p "$hb/.config/filebrowser" && touch "$hb/fb.db" && chmod 666 "$hb/fb.db"
         docker rm -f filebrowser &>/dev/null || true
-        log_info "初始化数据库..."
         docker run --rm --user 0:0 -v "$hb/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config init >/dev/null
         docker run --rm --user 0:0 -v "$hb/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin >/dev/null
-        
-        log_info "启动服务..."
-        docker run -d --name filebrowser --restart unless-stopped \
-            --user 0:0 \
-            -v "$hb":/srv \
-            -v "$hb/fb.db":/database/filebrowser.db \
-            -v "$hb/.config/filebrowser":/config \
-            -p $FB_PORT:80 \
-            filebrowser/filebrowser:latest >/dev/null
+        docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$hb":/srv -v "$hb/fb.db":/database/filebrowser.db -v "$hb/.config/filebrowser":/config -p $FB_PORT:80 filebrowser/filebrowser:latest >/dev/null
         open_port "$FB_PORT"
     fi
 }
 
-# ================= 5. 入口流程 =================
+# ================= 5. 主流程 =================
 
 if [[ "${1:-}" == "--uninstall" ]]; then uninstall ""; fi
 if [[ "${1:-}" == "--purge" ]]; then uninstall "--purge"; fi
 
 while getopts "u:p:c:q:vftod:k:" opt; do
-    case $opt in 
-        u) APP_USER=$OPTARG ;; p) APP_PASS=$OPTARG ;; c) QB_CACHE=$OPTARG ;; q) QB_VER_REQ=$OPTARG ;;
-        v) DO_VX=true ;; f) DO_FB=true ;; t) DO_TUNE=true ;; o) CUSTOM_PORT=true ;;
-        d) VX_RESTORE_URL=$OPTARG ;; k) VX_ZIP_PASS=$OPTARG ;;
-    esac
+    case $opt in u) APP_USER=$OPTARG ;; p) APP_PASS=$OPTARG ;; c) QB_CACHE=$OPTARG ;; q) QB_VER_REQ=$OPTARG ;; v) DO_VX=true ;; f) DO_FB=true ;; t) DO_TUNE=true ;; o) CUSTOM_PORT=true ;; d) VX_RESTORE_URL=$OPTARG ;; k) VX_ZIP_PASS=$OPTARG ;; esac
 done
 
 check_root
-print_banner "环境检查与依赖安装"
-wait_for_lock
-export DEBIAN_FRONTEND=noninteractive
-apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
+print_banner "安装环境准备"
+wait_for_lock; export DEBIAN_FRONTEND=noninteractive; apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
 
 if [[ -z "$APP_PASS" ]]; then
     echo -n "请输入 Web 面板密码 (至少12位): "
@@ -464,8 +320,7 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     echo -e "${BLUE}=======================================${NC}"
     echo -e "${YELLOW}       进入端口自定义模式       ${NC}"
     echo -e "${BLUE}=======================================${NC}"
-    QB_WEB_PORT=$(get_input_port "qBit WebUI" 8080)
-    QB_BT_PORT=$(get_input_port "qBit BT监听" 20000)
+    QB_WEB_PORT=$(get_input_port "qBit WebUI" 8080); QB_BT_PORT=$(get_input_port "qBit BT监听" 20000)
     [[ "$DO_VX" == "true" ]] && VX_PORT=$(get_input_port "Vertex" 3000)
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
 fi
@@ -495,5 +350,5 @@ if [[ "$DO_FB" == "true" ]]; then
     echo -e "   └─ 下载目录: ${YELLOW}Downloads${NC}"
 fi
 echo -e "${BLUE}========================================================${NC}"
-if [[ "$DO_TUNE" == "true" ]]; then echo -e "${YELLOW}提示: 深度内核优化已应用，且设置了开机自启，重启不失效。${NC}"; fi
+if [[ "$DO_TUNE" == "true" ]]; then echo -e "${YELLOW}提示: 深度持久化优化已应用，且设置了开机自启。${NC}"; fi
 echo -e "${RED}[注意] 如果无法访问端口，请检查云服务商网页端的防火墙/安全组设置！${NC}"
