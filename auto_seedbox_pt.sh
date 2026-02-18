@@ -59,7 +59,6 @@ log_info() { echo -e "${GREEN}[INFO] $1${NC}" >&2; }
 log_warn() { echo -e "${YELLOW}[WARN] $1${NC}" >&2; }
 log_err() { echo -e "${RED}[ERROR] $1${NC}" >&2; exit 1; }
 
-# 修复：使用 if 结构确保函数在 Root 权限下返回状态码 0
 check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_err "必须使用 root 权限运行 (sudo bash ...)"
@@ -77,7 +76,6 @@ check_os() {
     fi
 }
 
-# 修复：使用 ! 逻辑确保端口空闲时函数返回 0（成功）
 is_port_free() {
     local port=$1
     if command -v ss >/dev/null; then
@@ -122,7 +120,6 @@ prepare_env() {
     if [[ "$install_needed" == "true" ]]; then
         log_info "正在安装必要组件 (jq, curl, unzip, python3)..."
         export DEBIAN_FRONTEND=noninteractive
-        # 增加等待 apt 锁释放的逻辑
         apt-get -qq update && apt-get -qq install -y "${deps[@]}" net-tools >/dev/null
     fi
 }
@@ -133,6 +130,7 @@ install_qbit() {
     local home="/home/$QB_USER"
     local url=""
 
+    # --- 版本解析与下载 ---
     if [[ "$QB_VER_REQ" == "4" || "$QB_VER_REQ" == "4.3.9" ]]; then
         log_info "锁定经典版本: 4.3.9 (Static)"
         [[ "$ARCH" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
@@ -148,23 +146,36 @@ install_qbit() {
         fi
 
         [[ -z "$tag" || "$tag" == "null" ]] && log_err "未找到匹配版本。"
-        
-        local fname="x86_64-qbittorrent-nox"
-        [[ "$ARCH" == "aarch64" ]] && fname="aarch64-qbittorrent-nox"
-        url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${fname}"
+        url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${([[ "$ARCH" == "aarch64" ]] && echo "aarch64" || echo "x86_64")}-qbittorrent-nox"
         [[ "$tag" =~ release-5 ]] && INSTALLED_MAJOR_VER="5" || INSTALLED_MAJOR_VER="4"
     fi
 
     wget -q --show-progress -t 3 -O /usr/bin/qbittorrent-nox "$url"
     chmod +x /usr/bin/qbittorrent-nox
 
-    if ! id "$QB_USER" &>/dev/null; then useradd -m -s /bin/bash "$QB_USER"; fi
+    # --- 修复：Ubuntu admin 用户组冲突 ---
+    if ! id "$QB_USER" &>/dev/null; then
+        log_info "正在创建用户 $QB_USER ..."
+        if getent group "$QB_USER" >/dev/null; then
+            useradd -m -s /bin/bash -g "$QB_USER" "$QB_USER"
+        else
+            useradd -m -s /bin/bash "$QB_USER"
+        fi
+    fi
     mkdir -p "$home/.config/qBittorrent" "$home/Downloads"
-    chown -R "$QB_USER:$QB_USER" "$home"
+
+    # 磁盘检测 (用于 v4 线程优化)
+    local is_ssd=0
+    local dev_source=$(df --output=source "$home" | tail -1)
+    if [[ "$dev_source" == "/dev/"* ]]; then
+        local disk_pname=$(lsblk -nd -o PKNAME "$dev_source" 2>/dev/null || echo "${dev_source##*/}" | sed 's/[0-9]*$//')
+        [[ -f "/sys/block/$disk_pname/queue/rotational" && "$(cat /sys/block/$disk_pname/queue/rotational)" == "0" ]] && is_ssd=1
+    fi
 
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), os.urandom(16), 100000); print(f'@ByteArray({base64.b64encode(os.urandom(16)).decode()}:{base64.b64encode(dk).decode()})')" "$QB_PASS")
 
     if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
+        log_info "应用 v5 (MMap) 配置策略..."
         cat > "$home/.config/qBittorrent/qBittorrent.conf" << EOF
 [BitTorrent]
 Session\DefaultSavePath=$home/Downloads/
@@ -181,7 +192,9 @@ WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$QB_USER
 EOF
     else
+        log_info "应用 v4 (UserCache) 优化策略 (SSD: $is_ssd)..."
         local aio=4; local buf=10240
+        [[ "$is_ssd" -eq 1 ]] && { aio=12; buf=20480; }
         cat > "$home/.config/qBittorrent/qBittorrent.conf" << EOF
 [BitTorrent]
 Session\DefaultSavePath=$home/Downloads/
@@ -197,7 +210,7 @@ WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$QB_USER
 EOF
     fi
-    chown "$QB_USER:$QB_USER" "$home/.config/qBittorrent/qBittorrent.conf"
+    chown -R "$QB_USER:$QB_USER" "$home"
 
     cat > /etc/systemd/system/qbittorrent-nox@.service << EOF
 [Unit]
@@ -222,6 +235,7 @@ EOF
 
 install_apps() {
     if ! command -v docker >/dev/null; then
+        log_info "正在安装 Docker..."
         curl -fsSL https://get.docker.com | bash >/dev/null 2>&1
         systemctl enable docker; systemctl start docker
     fi
@@ -231,6 +245,7 @@ install_apps() {
     local home="/home/$QB_USER"
 
     if [[ "$DO_VX" == "true" ]]; then
+        log_info "部署 Vertex..."
         mkdir -p "$home/vertex"
         if [[ -n "$VX_RESTORE_URL" ]]; then
             wget -q -O "$TEMP_DIR/v.zip" "$VX_RESTORE_URL"
@@ -247,6 +262,7 @@ install_apps() {
     fi
 
     if [[ "$DO_FB" == "true" ]]; then
+        log_info "部署 FileBrowser..."
         touch "$home/fb.db" && chown "$uid:$gid" "$home/fb.db"
         docker rm -f filebrowser &>/dev/null || true
         docker run -d --name filebrowser --restart unless-stopped \
@@ -258,6 +274,7 @@ install_apps() {
 # ================= 4. 系统优化 =================
 
 sys_tune() {
+    log_info "正在应用内核优化 (BBR + Sysctl)..."
     [ ! -f /etc/sysctl.conf.bak ] && cp /etc/sysctl.conf /etc/sysctl.conf.bak
     cat > /etc/sysctl.d/99-ptbox-base.conf << EOF
 fs.file-max = 2097152
@@ -284,26 +301,7 @@ EOF
     sysctl --system >/dev/null 2>&1
 }
 
-# ================= 5. 卸载模块 =================
-
-uninstall() {
-    read -p "请输入要卸载的用户名: " u
-    [[ -z "$u" ]] && exit 1
-    systemctl stop "qbittorrent-nox@$u" 2>/dev/null || true
-    systemctl disable "qbittorrent-nox@$u" 2>/dev/null || true
-    rm -f /etc/systemd/system/qbittorrent-nox@.service /usr/bin/qbittorrent-nox
-    if command -v docker >/dev/null; then docker rm -f vertex filebrowser 2>/dev/null || true; fi
-    rm -f /etc/sysctl.d/99-ptbox-*.conf
-    sysctl --system >/dev/null 2>&1
-    [[ "$1" == "--purge" ]] && { userdel -r "$u" 2>/dev/null || rm -rf "/home/$u"; }
-    log_info "卸载完成。"
-    exit 0
-}
-
-# ================= 6. 主程序入口 =================
-
-if [[ "${1:-}" == "--uninstall" ]]; then uninstall ""; fi
-if [[ "${1:-}" == "--purge" ]]; then uninstall "--purge"; fi
+# ================= 5. 主程序入口 =================
 
 while getopts "u:p:c:q:vfd:k:toh" opt; do
     case $opt in
@@ -346,11 +344,22 @@ install_qbit
 [[ "$DO_VX" == "true" || "$DO_FB" == "true" ]] && install_apps
 [[ "$DO_TUNE" == "true" ]] && sys_tune
 
+# ================= 6. 最终完成输出 =================
+
 PUB_IP=$(curl -s --max-time 3 https://api.ipify.org || echo "ServerIP")
-echo -e "\n${GREEN}Auto-Seedbox-PT 安装成功!${NC}"
+
+echo ""
+echo "========================================================"
+echo -e "${GREEN}   Auto-Seedbox-PT 安装成功! (v${INSTALLED_MAJOR_VER} 内核)${NC}"
+echo "========================================================"
+echo -e "用户: ${YELLOW}$QB_USER${NC}"
+echo -e "密码: ${YELLOW}(您设置的密码)${NC}"
 echo "--------------------------------------------------------"
-echo "🧩 qBittorrent: http://$PUB_IP:$QB_WEB_PORT"
-[[ "$DO_VX" == "true" ]] && echo "🌐 Vertex:      http://$PUB_IP:$VX_PORT"
-[[ "$DO_FB" == "true" ]] && echo "📁 FileBrowser: http://$PUB_IP:$FB_PORT"
-echo "--------------------------------------------------------"
-if [ "$DO_TUNE" = true ]; then echo -e "${YELLOW}提示: 已应用内核深度优化，建议重启服务器 (reboot)${NC}"; fi
+echo -e "🧩 qBittorrent: http://$PUB_IP:$QB_WEB_PORT"
+[[ "$DO_VX" == "true" ]] && echo -e "🌐 Vertex:      http://$PUB_IP:$VX_PORT"
+[[ "$DO_FB" == "true" ]] && echo -e "📁 FileBrowser: http://$PUB_IP:$FB_PORT"
+echo "========================================================"
+
+if [[ "$DO_TUNE" == "true" ]]; then 
+    echo -e "${YELLOW}提示: 已应用内核深度优化，建议执行 reboot 重启服务器以生效${NC}"
+fi
