@@ -75,30 +75,13 @@ open_port() {
     fi
 }
 
-# [关键修复] 增加范围校验的端口输入函数
 get_input_port() {
     local prompt=$1; local default=$2; local port
     while true; do
         read -p "$prompt [默认 $default]: " port; port=${port:-$default}
-        
-        # 1. 检查是否为数字
-        if [[ ! "$port" =~ ^[0-9]+$ ]]; then 
-            log_warn "输入错误：请输入纯数字端口号。"
-            continue
-        fi
-
-        # 2. 检查范围 (1-65535)
-        if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then
-            log_warn "范围错误：端口必须在 1 到 65535 之间 (您输入了 $port)。"
-            continue
-        fi
-
-        # 3. 检查占用
-        if ss -tuln | grep -q ":$port "; then 
-            log_warn "占用错误：端口 $port 已被系统占用，请更换。"
-            continue
-        fi
-
+        if [[ ! "$port" =~ ^[0-9]+$ ]]; then log_warn "输入错误：请输入纯数字。"; continue; fi
+        if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then log_warn "范围错误：端口需在 1-65535 之间。"; continue; fi
+        if ss -tuln | grep -q ":$port "; then log_warn "占用错误：端口 $port 已被占用。"; continue; fi
         echo "$port"; return 0;
     done
 }
@@ -155,13 +138,11 @@ install_qbit() {
         log_info "版本策略: 搜索 [$QB_VER_REQ] ..."
         local api="https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases"
         local tag=""
-        
         if [[ "$QB_VER_REQ" == "latest" ]]; then
             tag=$(curl -sL "${api}/latest" | jq -r .tag_name)
         else
             tag=$(curl -sL "$api" | jq -r --arg v "$QB_VER_REQ" '.[].tag_name | select(contains($v))' | head -n 1)
         fi
-
         if [[ -z "$tag" || "$tag" == "null" ]]; then
             log_warn "未找到版本 [$QB_VER_REQ]，回退至默认 4.3.9 (优化版)"
             [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
@@ -172,7 +153,6 @@ install_qbit() {
             [[ "$arch" == "x86_64" ]] && fname="x86_64-qbittorrent-nox"
             [[ "$arch" == "aarch64" ]] && fname="aarch64-qbittorrent-nox"
             url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${fname}"
-            
             if [[ "$tag" =~ release-5 ]]; then INSTALLED_MAJOR_VER="5"; else INSTALLED_MAJOR_VER="4"; fi
         fi
     fi
@@ -184,10 +164,7 @@ install_qbit() {
     
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; salt = os.urandom(16); dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), salt, 100000); print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})')" "$APP_PASS")
 
-    # 磁盘检测与线程优化
-    local threads_val="4"
-    local cache_val="$QB_CACHE"
-    
+    local threads_val="4"; local cache_val="$QB_CACHE"
     if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
         log_info "应用 v5 优化: 禁用应用层缓存 (DiskWriteCacheSize=-1)"
         cache_val="-1"; threads_val="0"
@@ -231,9 +208,7 @@ EOF
     systemctl daemon-reload && systemctl enable "qbittorrent-nox@root" >/dev/null 2>&1
     systemctl restart "qbittorrent-nox@root"
     
-    open_port "$QB_WEB_PORT"
-    open_port "$QB_BT_PORT" "tcp"
-    open_port "$QB_BT_PORT" "udp"
+    open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
 }
 
 install_docker_retry() {
@@ -254,8 +229,16 @@ install_apps() {
 
     if [[ "$DO_VX" == "true" ]]; then
         print_banner "正在部署 Vertex"
-        mkdir -p "$hb/vertex/data"
         
+        # [V3.2 修复] 根据截图复刻完整目录结构
+        log_info "初始化 Vertex 完整目录结构..."
+        # 1. 创建一级目录
+        mkdir -p "$hb/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch,setting}
+        # 2. 创建必要的二级目录 (解决 rule/rss 等报错)
+        mkdir -p "$hb/vertex/data/rule/"{rss,link,race}
+        # 3. 赋予最高权限 (确保容器可写)
+        chmod -R 777 "$hb/vertex/data"
+
         if [[ -n "$VX_RESTORE_URL" ]]; then
             log_info "正在下载备份: $VX_RESTORE_URL"
             wget -q -O "$TEMP_DIR/vertex_backup.zip" "$VX_RESTORE_URL" || log_warn "备份下载失败，将安装纯净版"
@@ -322,18 +305,12 @@ EOF
 if [[ "${1:-}" == "--uninstall" ]]; then uninstall ""; fi
 if [[ "${1:-}" == "--purge" ]]; then uninstall "--purge"; fi
 
+# [重要] 确保 getopts 包含 u: 选项
 while getopts "u:p:c:q:vftod:k:" opt; do
     case $opt in 
-        u) APP_USER=$OPTARG ;; 
-        p) APP_PASS=$OPTARG ;; 
-        c) QB_CACHE=$OPTARG ;; 
-        q) QB_VER_REQ=$OPTARG ;;
-        v) DO_VX=true ;; 
-        f) DO_FB=true ;; 
-        t) DO_TUNE=true ;; 
-        o) CUSTOM_PORT=true ;;
-        d) VX_RESTORE_URL=$OPTARG ;;
-        k) VX_ZIP_PASS=$OPTARG ;;
+        u) APP_USER=$OPTARG ;; p) APP_PASS=$OPTARG ;; c) QB_CACHE=$OPTARG ;; q) QB_VER_REQ=$OPTARG ;;
+        v) DO_VX=true ;; f) DO_FB=true ;; t) DO_TUNE=true ;; o) CUSTOM_PORT=true ;;
+        d) VX_RESTORE_URL=$OPTARG ;; k) VX_ZIP_PASS=$OPTARG ;;
     esac
 done
 
@@ -366,7 +343,7 @@ PUB_IP=$(curl -s --max-time 3 https://api.ipify.org || echo "ServerIP")
 
 echo ""
 echo -e "${BLUE}########################################################${NC}"
-echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V3.0)             ${NC}"
+echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V3.2)             ${NC}"
 echo -e "${BLUE}########################################################${NC}"
 echo -e "Web 账号: ${YELLOW}$APP_USER${NC}"
 echo -e "Web 密码: ${YELLOW}(您刚才输入的密码)${NC}"
@@ -381,6 +358,7 @@ fi
 if [[ "$DO_FB" == "true" ]]; then
     echo -e "📁 FileBrowser: ${GREEN}http://$PUB_IP:$FB_PORT${NC}"
     echo -e "   └─ 初始账号: ${YELLOW}$APP_USER${NC} / ${YELLOW}(同上)${NC}"
+    echo -e "   └─ 下载目录: ${YELLOW}Downloads${NC} (文件夹内)"
 fi
 echo -e "${BLUE}========================================================${NC}"
 if [[ "$DO_TUNE" == "true" ]]; then echo -e "${YELLOW}提示: 深度内核优化已应用，建议重启服务器生效。${NC}"; fi
