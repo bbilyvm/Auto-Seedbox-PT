@@ -1,9 +1,20 @@
 #!/bin/bash
 
 ################################################################################
-# Auto-Seedbox-PT (ASP) v1.1 
+# Auto-Seedbox-PT (ASP) v1.0 
 # qBittorrent  + libtorrent  + Vertex + FileBrowser 一键安装脚本
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
+# 参数说明:
+#   -u : 用户名
+#   -p : 密码（必须 ≥ 8 位）
+#   -c : qBittorrent 缓存大小 (MiB)
+#   -q : qBittorrent 版本 (4.3.9)
+#   -v : 安装 Vertex
+#   -f : 安装 FileBrowser
+#   -t : 启用系统内核优化（强烈推荐）
+#   -o : 自定义端口 (会提示输入)
+#   -d : Vertex data 目录 ZIP 下载链接 (可选)
+#   -k : Vertex data ZIP 解压密码 (可选)
 ################################################################################
 
 set -euo pipefail
