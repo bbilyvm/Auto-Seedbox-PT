@@ -77,40 +77,26 @@ wait_for_lock() {
     done
 }
 
-# 修复：更强力的端口放行函数
 open_port() {
     local port=$1; local proto=${2:-tcp}
-    
-    # 检测 UFW 是否激活
     if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-        if ! ufw status | grep -q "$port"; then 
-            ufw allow "$port/$proto" >/dev/null
-            log_info "防火墙 (UFW) 已放行端口: $port/$proto"
-        fi
-    else
-        # 如果没有 UFW，尝试简单的 iptables 检查（不强制执行，避免破坏 Docker 链）
-        log_warn "未检测到活动防火墙 (UFW)，请确保云服务商安全组已放行端口: $port"
+        if ! ufw status | grep -q "$port"; then ufw allow "$port/$proto" >/dev/null; log_info "防火墙 UFW 已放行: $port/$proto"; fi
     fi
 }
 
 get_input_port() {
     local prompt=$1; local default=$2; local port
     while true; do
-        # 强制从 /dev/tty 读取输入
         read -p "$prompt [默认 $default]: " port < /dev/tty
         port=${port:-$default}
         if [[ ! "$port" =~ ^[0-9]+$ ]]; then log_warn "输入错误：请输入纯数字。"; continue; fi
         if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then log_warn "范围错误：端口需在 1-65535 之间。"; continue; fi
-        
-        # 端口占用检查 (排除自身)
-        if ss -tuln | grep -q ":$port "; then 
-            log_warn "提示：端口 $port 似乎已被占用，如果这是重装请忽略。"
-        fi
+        if ss -tuln | grep -q ":$port "; then log_warn "提示：端口 $port 已被占用，请更换。"; continue; fi
         echo "$port"; return 0;
     done
 }
 
-# ================= 2. 安装逻辑 =================
+# ================= 2. 安装与配置逻辑 =================
 
 uninstall() {
     echo -e "${YELLOW}========================================${NC}"
@@ -246,7 +232,6 @@ EOF
     systemctl daemon-reload && systemctl enable "qbittorrent-nox@root" >/dev/null 2>&1
     systemctl restart "qbittorrent-nox@root"
     
-    # 确保端口放行
     open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
 }
 
@@ -260,17 +245,48 @@ install_apps() {
         chmod -R 777 "$hb/vertex"
         docker rm -f vertex &>/dev/null || true
         
-        log_info "启动 Vertex 进行初始化..."
+        # 1. 首次启动 (Host模式) - 让 Vertex 自动生成目录和默认配置
+        # 注意：这里我们不尝试修改端口，让它先跑起来生成文件
+        log_info "启动 Vertex 进行初始化 (Host模式)..."
         docker run -d --name vertex --network host \
             -v "$hb/vertex":/vertex \
             -e TZ=Asia/Shanghai \
             lswl/vertex:stable >/dev/null
             
-        log_info "等待初始化 (15s)..."
-        sleep 15
+        # 2. 智能等待：检测 setting.json 是否生成 (最多等 30秒)
+        log_info "等待初始化配置生成..."
+        local wait_count=0
+        while [ ! -f "$hb/vertex/data/setting.json" ]; do
+            sleep 1
+            wait_count=$((wait_count+1))
+            if [ $wait_count -ge 30 ]; then
+                log_warn "初始化超时，Vertex 可能启动失败。"
+                break
+            fi
+        done
         
+        # 3. 停止容器进行配置
         docker stop vertex >/dev/null
         
+        # 4. 写入配置 (jq 精准修改内部端口)
+        # 关键点：在 Host 模式下，必须修改 setting.json 的 port 字段，Vertex 才会监听新端口
+        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
+        local set_file="$hb/vertex/data/setting.json"
+        
+        log_info "配置 Vertex 端口为: $VX_PORT"
+        if [ -f "$set_file" ]; then
+            # 使用 jq 修改存在的配置
+            jq --arg u "$APP_USER" --arg p "$vx_pass_md5" --argjson pt "$VX_PORT" \
+               '.username = $u | .password = $p | .port = $pt' \
+               "$set_file" > "${set_file}.tmp" && mv "${set_file}.tmp" "$set_file"
+        else
+            # 兜底：如果还没生成，手动创建
+            cat > "$set_file" << EOF
+{ "username": "$APP_USER", "password": "$vx_pass_md5", "port": $VX_PORT }
+EOF
+        fi
+        
+        # 5. 恢复备份 (如果存在)
         if [[ -n "$VX_RESTORE_URL" ]]; then
             log_info "恢复备份数据..."
             wget -q -O "$TEMP_DIR/bk.zip" "$VX_RESTORE_URL"
@@ -278,27 +294,16 @@ install_apps() {
                 local unzip_cmd="unzip -o"
                 [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P $VX_ZIP_PASS"
                 $unzip_cmd "$TEMP_DIR/bk.zip" -d "$hb/vertex/" >/dev/null || log_warn "备份解压失败"
+                
+                # 恢复后再次强制修改端口，防止被备份文件的设置覆盖
+                jq --argjson pt "$VX_PORT" '.port = $pt' "$set_file" > "${set_file}.tmp" && mv "${set_file}.tmp" "$set_file"
             fi
         fi
-
-        # 写入配置 (jq)
-        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
-        local set_file="$hb/vertex/data/setting.json"
         
-        if [ -f "$set_file" ]; then
-            log_info "配置 Vertex 端口 ($VX_PORT)..."
-            jq --arg u "$APP_USER" --arg p "$vx_pass_md5" --argjson pt "$VX_PORT" \
-               '.username = $u | .password = $p | .port = $pt' \
-               "$set_file" > "${set_file}.tmp" && mv "${set_file}.tmp" "$set_file"
-        else
-            log_info "创建 Vertex 配置文件 (端口: $VX_PORT)..."
-            cat > "$set_file" << EOF
-{ "username": "$APP_USER", "password": "$vx_pass_md5", "port": $VX_PORT }
-EOF
-        fi
-        
+        # 6. 重启容器
         docker start vertex >/dev/null
-        # 确保防火墙放行 Vertex 端口
+        
+        # 7. 确保防火墙放行用户指定的 Vertex 端口
         open_port "$VX_PORT"
     fi
 
@@ -306,19 +311,20 @@ EOF
         print_banner "正在部署 FileBrowser"
         rm -rf "$hb/.config/filebrowser" "$hb/fb.db"
         
-        # 修复权限问题: 创建文件并赋予所有人读写权限
+        # 创建数据库文件并赋予写权限
         mkdir -p "$hb/.config/filebrowser" 
         touch "$hb/fb.db"
         chmod 666 "$hb/fb.db"
         
         docker rm -f filebrowser &>/dev/null || true
-        log_info "初始化数据库 (Root权限)..."
+        log_info "初始化数据库..."
         
-        # 使用 --user 0:0 强制 Root 运行，彻底解决权限问题
+        # 强制 Root 运行初始化
         docker run --rm --user 0:0 -v "$hb/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config init >/dev/null
         docker run --rm --user 0:0 -v "$hb/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin >/dev/null
         
         log_info "启动服务..."
+        # 强制 Root 运行主进程
         docker run -d --name filebrowser --restart unless-stopped \
             --user 0:0 \
             -v "$hb":/srv \
@@ -327,7 +333,6 @@ EOF
             -p $FB_PORT:80 \
             filebrowser/filebrowser:latest >/dev/null
             
-        # 确保防火墙放行 FileBrowser 端口
         open_port "$FB_PORT"
     fi
 }
@@ -370,7 +375,6 @@ export DEBIAN_FRONTEND=noninteractive
 apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
 
 if [[ -z "$APP_PASS" ]]; then
-    # 强制从终端读取密码，防止被管道吞没
     echo -n "请输入 Web 面板密码 (至少12位): "
     read -s APP_PASS < /dev/tty
     echo ""
