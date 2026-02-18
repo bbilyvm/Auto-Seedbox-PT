@@ -251,18 +251,25 @@ install_apps() {
         docker rm -f vertex &>/dev/null || true
         
         # 2. 首次启动：Bridge 模式，映射端口
-        # 注意：这里我们使用 -p 映射，将外部 $VX_PORT 转发到容器内部 3000
-        # 这样就不需要修改容器内部配置文件的端口了，极其稳定
         log_info "启动 Vertex 进行初始化..."
+        # 关键: -p $VX_PORT:3000 表示将用户端口映射到容器内部固定的3000
         docker run -d --name vertex \
             -p $VX_PORT:3000 \
             -v "$hb/vertex":/vertex \
             -e TZ=Asia/Shanghai \
             lswl/vertex:stable >/dev/null
             
-        # 3. 等待初始化生成文件 (防止 ENOENT)
-        log_info "等待初始化 (15s)..."
-        sleep 15
+        # 3. 智能等待配置生成 (替代 sleep 15)
+        log_info "等待初始化完成..."
+        local wait_count=0
+        while [ ! -f "$hb/vertex/data/setting.json" ]; do
+            sleep 1
+            wait_count=$((wait_count+1))
+            if [ $wait_count -ge 30 ]; then
+                log_warn "初始化耗时较长，继续尝试..."
+                break
+            fi
+        done
         
         # 4. 停止容器配置账号
         docker stop vertex >/dev/null
@@ -278,28 +285,29 @@ install_apps() {
             fi
         fi
 
-        # 5. 注入账号密码 (仅修改 user/pass，绝对不碰端口)
+        # 5. 注入配置
+        # 关键逻辑：强制将内部端口配置为 3000
+        # 原因：Docker Bridge 模式转发流量到容器的 3000 端口，如果 Vertex 监听别的端口(比如备份里的4000)，连接就会断开。
         local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
         local set_file="$hb/vertex/data/setting.json"
         
-        log_info "配置 Vertex 账号..."
+        log_info "配置 Vertex (账号注入 + 端口锁定3000)..."
         if [ -f "$set_file" ]; then
-            # 文件已存在 (正常情况)
+            # 文件已存在: 修改账号密码，并强制重置 port 为 3000
             jq --arg u "$APP_USER" --arg p "$vx_pass_md5" \
-               '.username = $u | .password = $p' \
+               '.username = $u | .password = $p | .port = 3000' \
                "$set_file" > "${set_file}.tmp" && mv "${set_file}.tmp" "$set_file"
         else
-            # 兜底：如果没生成，手动创建一个只含账号密码的文件
-            # Vertex 启动时会合并默认配置 (默认监听3000)
+            # 兜底创建
             cat > "$set_file" << EOF
-{ "username": "$APP_USER", "password": "$vx_pass_md5" }
+{ "username": "$APP_USER", "password": "$vx_pass_md5", "port": 3000 }
 EOF
         fi
         
         # 6. 最终重启
         docker start vertex >/dev/null
         open_port "$VX_PORT"
-        log_info "Vertex 部署完成，端口映射: $VX_PORT -> 3000"
+        log_info "Vertex 部署完成，外部端口: $VX_PORT -> 内部端口: 3000"
     fi
 
     if [[ "$DO_FB" == "true" ]]; then
