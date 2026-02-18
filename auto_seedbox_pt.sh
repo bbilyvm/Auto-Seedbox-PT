@@ -208,9 +208,7 @@ EOF
     systemctl daemon-reload && systemctl enable "qbittorrent-nox@root" >/dev/null 2>&1
     systemctl restart "qbittorrent-nox@root"
     
-    open_port "$QB_WEB_PORT"
-    open_port "$QB_BT_PORT" "tcp"
-    open_port "$QB_BT_PORT" "udp"
+    open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
 }
 
 install_docker_retry() {
@@ -232,42 +230,65 @@ install_apps() {
     if [[ "$DO_VX" == "true" ]]; then
         print_banner "正在部署 Vertex"
         
-        # [V3.2 修复] 根据截图复刻完整目录结构
-        log_info "初始化 Vertex 完整目录结构..."
-        # 1. 创建一级目录
-        mkdir -p "$hb/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch,setting}
-        # 2. 创建必要的二级目录 (解决 rule/rss 等报错)
-        mkdir -p "$hb/vertex/data/rule/"{rss,link,race}
-        # 3. 赋予最高权限 (确保容器可写)
-        chmod -R 777 "$hb/vertex/data"
-
+        # [V3.3 逻辑重构] 参考 vivibudong 脚本逻辑
+        # 1. 仅创建根目录，不创建子目录
+        mkdir -p "$hb/vertex"
+        chmod 755 "$hb/vertex"
+        
+        # 2. 清理旧容器
+        docker rm -f vertex &>/dev/null || true
+        
+        # 3. 首次启动 (为了让Vertex自动生成目录结构)
+        log_info "正在启动 Vertex 进行初始化 (请耐心等待)..."
+        docker run -d --name vertex \
+            -p $VX_PORT:3000 \
+            -v "$hb/vertex":/vertex \
+            -e TZ=Asia/Shanghai \
+            lswl/vertex:stable >/dev/null
+            
+        # 4. 等待初始化 (Vertex生成文件需要时间)
+        sleep 10 
+        
+        # 5. 停止容器以修改配置
+        log_info "初始化完成，正在配置账号密码..."
+        docker stop vertex >/dev/null
+        
+        # 6. 恢复备份逻辑 (如果指定了 -d)
         if [[ -n "$VX_RESTORE_URL" ]]; then
-            log_info "正在下载备份: $VX_RESTORE_URL"
-            wget -q -O "$TEMP_DIR/vertex_backup.zip" "$VX_RESTORE_URL" || log_warn "备份下载失败，将安装纯净版"
+            log_info "正在恢复备份数据..."
+            wget -q -O "$TEMP_DIR/vertex_backup.zip" "$VX_RESTORE_URL"
             if [[ -f "$TEMP_DIR/vertex_backup.zip" ]]; then
-                log_info "正在解压备份..."
                 local unzip_cmd="unzip -o"
                 [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P $VX_ZIP_PASS"
-                if $unzip_cmd "$TEMP_DIR/vertex_backup.zip" -d "$hb/vertex/"; then
-                    log_info "✅ 备份恢复成功"
-                else
-                    log_err "❌ 解压失败，请检查密码 (-k) 是否正确"
-                fi
+                $unzip_cmd "$TEMP_DIR/vertex_backup.zip" -d "$hb/vertex/" >/dev/null || log_warn "备份解压失败，密码错误?"
             fi
         fi
 
-        log_info "同步 Web 账号密码..."
+        # 7. 注入账号密码 (使用 jq 精准修改，模拟参考脚本逻辑)
         local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
-        cat > "$hb/vertex/data/setting.json" << EOF
+        local settings_file="$hb/vertex/data/setting.json"
+        
+        # 确保 data 目录存在 (防止Vertex启动极慢还没生成)
+        mkdir -p "$hb/vertex/data"
+        
+        if [ -f "$settings_file" ]; then
+            # 文件存在，使用 jq 修改
+            jq --arg user "$APP_USER" --arg pass "$vx_pass_md5" \
+               '.username = $user | .password = $pass' \
+               "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
+        else
+            # 文件不存在(初始化慢了或全新安装)，直接创建
+            cat > "$settings_file" << EOF
 {
   "username": "$APP_USER",
   "password": "$vx_pass_md5",
-  "port": 3000,
-  "configPath": "/vertex/data"
+  "port": 3000
 }
 EOF
-        docker rm -f vertex &>/dev/null || true
-        docker run -d --name vertex --restart unless-stopped -p $VX_PORT:3000 -v "$hb/vertex":/vertex -e TZ=Asia/Shanghai -e PUID=0 -e PGID=0 lswl/vertex:stable >/dev/null
+        fi
+        
+        # 8. 最终重启
+        docker start vertex >/dev/null
         open_port "$VX_PORT"
     fi
 
@@ -344,7 +365,7 @@ PUB_IP=$(curl -s --max-time 3 https://api.ipify.org || echo "ServerIP")
 
 echo ""
 echo -e "${BLUE}########################################################${NC}"
-echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V3.2)             ${NC}"
+echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V3.3)             ${NC}"
 echo -e "${BLUE}########################################################${NC}"
 echo -e "Web 账号: ${YELLOW}$APP_USER${NC}"
 echo -e "Web 密码: ${YELLOW}(您刚才输入的密码)${NC}"
