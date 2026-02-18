@@ -20,13 +20,20 @@
 set -euo pipefail
 IFS=$'\n\t'
 
-# ================= 0. 全局变量 =================
-RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;36m'; NC='\033[0m'
+# ================= 0. 全局变量与配色 =================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
+BLUE='\033[0;36m'
+NC='\033[0m' # No Color
 
 # 默认端口
-QB_WEB_PORT=8080; QB_BT_PORT=20000; VX_PORT=3000; FB_PORT=8081
+QB_WEB_PORT=8080
+QB_BT_PORT=20000
+VX_PORT=3000
+FB_PORT=8081
 
-# 参数变量初始化
+# 参数默认值
 APP_USER="admin"
 APP_PASS=""
 QB_CACHE=1024
@@ -41,7 +48,7 @@ INSTALLED_MAJOR_VER="4"
 
 TEMP_DIR=$(mktemp -d); trap 'rm -rf "$TEMP_DIR"' EXIT
 
-# 特殊优化版源
+# 下载源
 URL_V4_AMD64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent-4.3.9/x86_64/qBittorrent-4.3.9%20-%20libtorrent-v1.2.20/qbittorrent-nox"
 URL_V4_ARM64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent-4.3.9/ARM64/qBittorrent-4.3.9%20-%20libtorrent-v1.2.20/qbittorrent-nox"
 
@@ -57,12 +64,14 @@ print_banner() {
     echo -e "${BLUE}------------------------------------------------${NC}"
 }
 
-check_root() { if [[ $EUID -ne 0 ]]; then log_err "请使用 sudo -i 切换到 root 后运行！"; fi; }
+check_root() { 
+    if [[ $EUID -ne 0 ]]; then log_err "权限不足：请使用 sudo -i 切换到 root 用户后运行！"; fi 
+}
 
 wait_for_lock() {
     local max_wait=300; local waited=0
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1 || fuser /var/lib/apt/lists/lock >/dev/null 2>&1; do
-        if [ $waited -eq 0 ]; then log_warn "检测到系统后台正在更新，等待锁释放..."; fi
+        if [ $waited -eq 0 ]; then log_warn "系统更新进程运行中，等待锁释放..."; fi
         sleep 2; waited=$((waited + 2))
         if [ $waited -ge $max_wait ]; then rm -f /var/lib/dpkg/lock*; break; fi
     done
@@ -71,7 +80,7 @@ wait_for_lock() {
 open_port() {
     local port=$1; local proto=${2:-tcp}
     if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then
-        if ! ufw status | grep -q "$port"; then ufw allow "$port/$proto" >/dev/null; log_info "防火墙已放行: $port/$proto"; fi
+        if ! ufw status | grep -q "$port"; then ufw allow "$port/$proto" >/dev/null; log_info "防火墙 UFW 已放行: $port/$proto"; fi
     fi
 }
 
@@ -81,58 +90,32 @@ get_input_port() {
         read -p "$prompt [默认 $default]: " port; port=${port:-$default}
         if [[ ! "$port" =~ ^[0-9]+$ ]]; then log_warn "输入错误：请输入纯数字。"; continue; fi
         if [[ "$port" -lt 1 || "$port" -gt 65535 ]]; then log_warn "范围错误：端口需在 1-65535 之间。"; continue; fi
-        if ss -tuln | grep -q ":$port "; then log_warn "占用错误：端口 $port 已被占用。"; continue; fi
+        if ss -tuln | grep -q ":$port "; then log_warn "提示：端口 $port 已被占用，请更换。"; continue; fi
         echo "$port"; return 0;
     done
 }
 
-# ================= 2. 安装与卸载逻辑 =================
+# ================= 2. 安装逻辑 =================
 
-uninstall() {
-    echo -e "${YELLOW}========================================${NC}"
-    echo -e "${YELLOW}      Auto-Seedbox-PT 卸载程序          ${NC}"
-    echo -e "${YELLOW}========================================${NC}"
-    read -p "警告：将停止服务并删除配置。确定继续吗？[y/N]: " confirm
-    [[ ! "$confirm" =~ ^[Yy]$ ]] && exit 0
-    
-    log_info "正在清理服务..."
-    systemctl stop "qbittorrent-nox@root" 2>/dev/null || true
-    systemctl disable "qbittorrent-nox@root" 2>/dev/null || true
-    rm -f /etc/systemd/system/qbittorrent-nox@.service /usr/bin/qbittorrent-nox
-    systemctl daemon-reload
-    
-    if command -v docker >/dev/null; then 
-        log_info "正在删除容器..."
-        docker rm -f vertex filebrowser 2>/dev/null || true
-    fi
-    rm -f /etc/sysctl.d/99-ptbox.conf
-    sysctl --system >/dev/null 2>&1
-
-    if [[ "${1:-}" == "--purge" ]]; then
-        log_warn "正在深度清除数据..."
-        rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/fb.db"
-        read -p "是否删除下载目录 (/root/Downloads)? [y/N]: " del_dl
-        [[ "$del_dl" =~ ^[Yy]$ ]] && rm -rf "/root/Downloads"
-    fi
-    log_info "卸载完成。"
-    exit 0
+install_docker_env() {
+    if command -v docker >/dev/null; then return 0; fi
+    print_banner "安装 Docker 环境"
+    local retries=3; local count=0
+    until [ $count -ge $retries ]; do
+        wait_for_lock
+        if curl -fsSL https://get.docker.com | bash; then return 0; fi
+        count=$((count+1)); log_warn "安装失败，重试中 ($count/$retries)..."; sleep 5
+    done
+    log_err "Docker 安装失败，请检查网络。"
 }
 
 install_qbit() {
-    print_banner "正在安装 qBittorrent"
+    print_banner "安装 qBittorrent"
     local hb="/root"; local url=""; local arch=$(uname -m)
     
     if [[ "$QB_VER_REQ" == "4" || "$QB_VER_REQ" == "4.3.9" ]]; then
         log_info "版本策略: 锁定 4.3.9 (Special Optimized)"
-        if [[ "$arch" == "x86_64" ]]; then
-            url="$URL_V4_AMD64"
-            log_info "检测到 x86_64 架构，使用专用优化版。"
-        elif [[ "$arch" == "aarch64" ]]; then
-            url="$URL_V4_ARM64"
-            log_info "检测到 ARM64 架构，使用专用优化版。"
-        else
-            log_err "不支持的架构: $arch"
-        fi
+        [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
         INSTALLED_MAJOR_VER="4"
     else
         log_info "版本策略: 搜索 [$QB_VER_REQ] ..."
@@ -143,8 +126,9 @@ install_qbit() {
         else
             tag=$(curl -sL "$api" | jq -r --arg v "$QB_VER_REQ" '.[].tag_name | select(contains($v))' | head -n 1)
         fi
+        
         if [[ -z "$tag" || "$tag" == "null" ]]; then
-            log_warn "未找到版本 [$QB_VER_REQ]，回退至默认 4.3.9 (优化版)"
+            log_warn "未找到版本 [$QB_VER_REQ]，回退至默认 4.3.9"
             [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
             INSTALLED_MAJOR_VER="4"
         else
@@ -157,19 +141,20 @@ install_qbit() {
         fi
     fi
 
-    log_info "下载地址: $url"
+    log_info "下载二进制文件: $url"
     wget -q --show-progress -O /usr/bin/qbittorrent-nox "$url"
     chmod +x /usr/bin/qbittorrent-nox
     mkdir -p "$hb/.config/qBittorrent" "$hb/Downloads"
     
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; salt = os.urandom(16); dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), salt, 100000); print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})')" "$APP_PASS")
 
+    # 线程与缓存优化
     local threads_val="4"; local cache_val="$QB_CACHE"
     if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
         log_info "应用 v5 优化: 禁用应用层缓存 (DiskWriteCacheSize=-1)"
         cache_val="-1"; threads_val="0"
     else
-        log_info "应用 v4 优化: 缓存 $QB_CACHE MiB"
+        log_info "应用 v4 优化: 设置缓存 $QB_CACHE MiB"
         local root_disk=$(df /root | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//;s/\/dev\///')
         local rot_path="/sys/block/$root_disk/queue/rotational"
         if [ ! -f "$rot_path" ]; then root_disk=$(lsblk -nd -o NAME | head -1); rot_path="/sys/block/$root_disk/queue/rotational"; fi
@@ -189,6 +174,8 @@ Downloads\DiskWriteCacheSize=$cache_val
 WebUI\Password_PBKDF2="$pass_hash"
 WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$APP_USER
+WebUI\AuthSubnetWhitelist=127.0.0.1/32, 172.16.0.0/12
+WebUI\AuthSubnetWhitelistEnabled=true
 EOF
     
     cat > /etc/systemd/system/qbittorrent-nox@.service << EOF
@@ -211,93 +198,89 @@ EOF
     open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
 }
 
-install_docker_retry() {
-    if command -v docker >/dev/null; then return 0; fi
-    print_banner "正在安装 Docker"
-    local retries=3; local count=0
-    until [ $count -ge $retries ]; do
-        wait_for_lock
-        if curl -fsSL https://get.docker.com | bash; then return 0; fi
-        count=$((count+1)); log_warn "安装失败，重试中 ($count/$retries)..."; sleep 5
-    done
-    log_err "Docker 安装失败，请检查网络。"
-}
-
 install_apps() {
-    install_docker_retry
+    install_docker_env
     local hb="/root"
 
     if [[ "$DO_VX" == "true" ]]; then
-        print_banner "正在部署 Vertex"
-        
-        # [V3.5 最终版] Host 模式 + 预配置文件
-        # 1. 创建目录
+        print_banner "正在部署 Vertex (Host模式)"
         mkdir -p "$hb/vertex/data"
-        chmod 755 "$hb/vertex"
-        
-        # 2. 准备账号密码
-        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
-        
-        # 3. 预先写入 setting.json
-        # 这是为了确保第一次启动就能监听到正确的端口 (包括自定义端口)
-        log_info "预生成配置文件 (端口: $VX_PORT)..."
-        cat > "$hb/vertex/data/setting.json" << EOF
-{
-  "username": "$APP_USER",
-  "password": "$vx_pass_md5",
-  "port": $VX_PORT
-}
-EOF
-
-        # 4. 如果有备份，先恢复备份 (会覆盖上面的 setting.json，所以需要后续修正)
-        if [[ -n "$VX_RESTORE_URL" ]]; then
-            log_info "正在恢复备份数据..."
-            wget -q -O "$TEMP_DIR/vertex_backup.zip" "$VX_RESTORE_URL"
-            if [[ -f "$TEMP_DIR/vertex_backup.zip" ]]; then
-                local unzip_cmd="unzip -o"
-                [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P $VX_ZIP_PASS"
-                $unzip_cmd "$TEMP_DIR/vertex_backup.zip" -d "$hb/vertex/" >/dev/null || log_warn "备份解压失败，密码错误?"
-                
-                # 恢复备份后，再次修正端口和密码 (防止备份中的旧配置冲突)
-                local settings_file="$hb/vertex/data/setting.json"
-                if [ -f "$settings_file" ]; then
-                    log_info "修正备份文件中的端口与密码..."
-                    jq --arg user "$APP_USER" --arg pass "$vx_pass_md5" \
-                       --argjson port "$VX_PORT" \
-                       '.username = $user | .password = $pass | .port = $port' \
-                       "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
-                fi
-            fi
-        fi
-
-        # 5. 清理旧容器并启动 (Host 模式)
+        chmod -R 777 "$hb/vertex"
         docker rm -f vertex &>/dev/null || true
-        log_info "正在启动 Vertex (Host 模式)..."
-        docker run -d --name vertex \
-            --network host \
+        
+        # 1. 预创建必要目录 (防 ENOENT)
+        log_info "预创建数据目录结构..."
+        mkdir -p "$hb/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
+        mkdir -p "$hb/vertex/data/rule/"{rss,link,race}
+        chmod -R 777 "$hb/vertex/data"
+
+        # 2. 首次启动 (Host模式)
+        log_info "启动 Vertex 进行初始化..."
+        docker run -d --name vertex --network host \
             -v "$hb/vertex":/vertex \
             -e TZ=Asia/Shanghai \
             lswl/vertex:stable >/dev/null
             
-        # 6. 放行防火墙 (Host模式需要手动放行宿主机端口)
+        log_info "等待初始化 (15s)..."
+        sleep 15
+        
+        # 3. 停止容器配置
+        docker stop vertex >/dev/null
+        
+        if [[ -n "$VX_RESTORE_URL" ]]; then
+            log_info "恢复备份数据: $VX_RESTORE_URL"
+            wget -q -O "$TEMP_DIR/bk.zip" "$VX_RESTORE_URL"
+            if [[ -f "$TEMP_DIR/bk.zip" ]]; then
+                local unzip_cmd="unzip -o"
+                [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P $VX_ZIP_PASS"
+                $unzip_cmd "$TEMP_DIR/bk.zip" -d "$hb/vertex/" >/dev/null || log_warn "备份解压失败"
+            fi
+        fi
+
+        # 4. 写入配置 (jq 精准控制端口和密码)
+        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
+        local set_file="$hb/vertex/data/setting.json"
+        
+        if [ -f "$set_file" ]; then
+            log_info "更新配置文件 (端口: $VX_PORT)..."
+            jq --arg u "$APP_USER" --arg p "$vx_pass_md5" --argjson pt "$VX_PORT" \
+               '.username = $u | .password = $p | .port = $pt' \
+               "$set_file" > "${set_file}.tmp" && mv "${set_file}.tmp" "$set_file"
+        else
+            log_info "创建配置文件 (端口: $VX_PORT)..."
+            cat > "$set_file" << EOF
+{ "username": "$APP_USER", "password": "$vx_pass_md5", "port": $VX_PORT }
+EOF
+        fi
+        
+        # 5. 重启
+        docker start vertex >/dev/null
         open_port "$VX_PORT"
     fi
 
     if [[ "$DO_FB" == "true" ]]; then
         print_banner "正在部署 FileBrowser"
-        log_info "初始化数据库并创建用户..."
         rm -rf "$hb/.config/filebrowser" "$hb/fb.db"
         mkdir -p "$hb/.config/filebrowser" && touch "$hb/fb.db"
+        
         docker rm -f filebrowser &>/dev/null || true
-        docker run --rm -v "$hb/fb.db":/database/filebrowser.db --user 0:0 filebrowser/filebrowser:latest config init >/dev/null
-        docker run --rm -v "$hb/fb.db":/database/filebrowser.db --user 0:0 filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin >/dev/null
-        docker run -d --name filebrowser --restart unless-stopped -v "$hb":/srv -v "$hb/fb.db":/database/filebrowser.db -v "$hb/.config/filebrowser":/config -p $FB_PORT:80 --user 0:0 filebrowser/filebrowser:latest >/dev/null
+        log_info "初始化数据库..."
+        docker run --rm -v "$hb/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config init >/dev/null
+        docker run --rm -v "$hb/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin >/dev/null
+        
+        log_info "启动服务..."
+        docker run -d --name filebrowser --restart unless-stopped \
+            -v "$hb":/srv \
+            -v "$hb/fb.db":/database/filebrowser.db \
+            -v "$hb/.config/filebrowser":/config \
+            -p $FB_PORT:80 \
+            filebrowser/filebrowser:latest >/dev/null
         open_port "$FB_PORT"
     fi
 }
 
 sys_tune() {
-    print_banner "应用系统优化"
+    print_banner "应用系统优化 (BBR+FQ)"
     [ ! -f /etc/sysctl.conf.bak ] && cp /etc/sysctl.conf /etc/sysctl.conf.bak
     cat > /etc/sysctl.d/99-ptbox.conf << EOF
 fs.file-max=1048576
@@ -311,7 +294,7 @@ EOF
     sysctl --system >/dev/null 2>&1
     local eth=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
     [[ -n "$eth" ]] && ifconfig "$eth" txqueuelen 10000 2>/dev/null || true
-    log_info "内核参数与网卡队列优化已完成。"
+    log_info "内核参数与网卡队列优化已应用。"
 }
 
 # ================= 3. 主流程 =================
@@ -343,7 +326,7 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     echo -e "${YELLOW}       进入端口自定义模式       ${NC}"
     echo -e "${BLUE}=======================================${NC}"
     QB_WEB_PORT=$(get_input_port "qBit WebUI" 8080)
-    QB_BT_PORT=$(get_input_port "qBit BT监听 (Incoming Port)" 20000)
+    QB_BT_PORT=$(get_input_port "qBit BT监听" 20000)
     [[ "$DO_VX" == "true" ]] && VX_PORT=$(get_input_port "Vertex" 3000)
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
 fi
@@ -355,24 +338,22 @@ install_qbit
 PUB_IP=$(curl -s --max-time 3 https://api.ipify.org || echo "ServerIP")
 
 echo ""
-echo -e "${BLUE}########################################################${NC}"
-echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V3.5)             ${NC}"
-echo -e "${BLUE}########################################################${NC}"
+echo -e "${GREEN}########################################################${NC}"
+echo -e "${GREEN}          Auto-Seedbox-PT 安装成功!                    ${NC}"
+echo -e "${GREEN}########################################################${NC}"
 echo -e "Web 账号: ${YELLOW}$APP_USER${NC}"
-echo -e "Web 密码: ${YELLOW}(您刚才输入的密码)${NC}"
-echo -e "BT 端口 : ${YELLOW}$QB_BT_PORT${NC} (TCP/UDP 已放行)"
+echo -e "Web 密码: ${YELLOW}(您设定的密码)${NC}"
+echo -e "BT 端口 : ${YELLOW}$QB_BT_PORT${NC} (TCP/UDP)"
 echo -e "${BLUE}--------------------------------------------------------${NC}"
-echo -e "🧩 qBittorrent: ${GREEN}http://$PUB_IP:$QB_WEB_PORT${NC} (核心: v$INSTALLED_MAJOR_VER)"
+echo -e "🧩 qBittorrent: ${GREEN}http://$PUB_IP:$QB_WEB_PORT${NC}"
 if [[ "$DO_VX" == "true" ]]; then
-    echo -e "🌐 Vertex:      ${GREEN}http://$PUB_IP:$VX_PORT${NC}"
-    echo -e "   └─ 初始账号: ${YELLOW}$APP_USER${NC} / ${YELLOW}(同上)${NC}"
-    echo -e "   └─ 网络模式: ${GREEN}Host${NC} (支持 127.0.0.1 连QB)"
+    echo -e "🌐 Vertex:      ${GREEN}http://$PUB_IP:$VX_PORT${NC} (Host模式)"
+    echo -e "   └─ 提示: 下载器地址请填 ${YELLOW}127.0.0.1:$QB_WEB_PORT${NC}"
     if [[ -n "$VX_RESTORE_URL" ]]; then echo -e "   └─ 状态: ${GREEN}数据已恢复${NC}"; fi
 fi
 if [[ "$DO_FB" == "true" ]]; then
     echo -e "📁 FileBrowser: ${GREEN}http://$PUB_IP:$FB_PORT${NC}"
-    echo -e "   └─ 初始账号: ${YELLOW}$APP_USER${NC} / ${YELLOW}(同上)${NC}"
-    echo -e "   └─ 下载目录: ${YELLOW}Downloads${NC} (文件夹内)"
+    echo -e "   └─ 下载目录: ${YELLOW}Downloads${NC}"
 fi
 echo -e "${BLUE}========================================================${NC}"
 if [[ "$DO_TUNE" == "true" ]]; then echo -e "${YELLOW}提示: 深度内核优化已应用，建议重启服务器生效。${NC}"; fi
