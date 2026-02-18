@@ -230,30 +230,26 @@ install_apps() {
     if [[ "$DO_VX" == "true" ]]; then
         print_banner "正在部署 Vertex"
         
-        # [V3.3 逻辑重构] 参考 vivibudong 脚本逻辑
-        # 1. 仅创建根目录，不创建子目录
-        mkdir -p "$hb/vertex"
+        # [V3.5 最终版] Host 模式 + 预配置文件
+        # 1. 创建目录
+        mkdir -p "$hb/vertex/data"
         chmod 755 "$hb/vertex"
         
-        # 2. 清理旧容器
-        docker rm -f vertex &>/dev/null || true
+        # 2. 准备账号密码
+        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
         
-        # 3. 首次启动 (为了让Vertex自动生成目录结构)
-        log_info "正在启动 Vertex 进行初始化 (请耐心等待)..."
-        docker run -d --name vertex \
-            -p $VX_PORT:3000 \
-            -v "$hb/vertex":/vertex \
-            -e TZ=Asia/Shanghai \
-            lswl/vertex:stable >/dev/null
-            
-        # 4. 等待初始化 (Vertex生成文件需要时间)
-        sleep 10 
-        
-        # 5. 停止容器以修改配置
-        log_info "初始化完成，正在配置账号密码..."
-        docker stop vertex >/dev/null
-        
-        # 6. 恢复备份逻辑 (如果指定了 -d)
+        # 3. 预先写入 setting.json
+        # 这是为了确保第一次启动就能监听到正确的端口 (包括自定义端口)
+        log_info "预生成配置文件 (端口: $VX_PORT)..."
+        cat > "$hb/vertex/data/setting.json" << EOF
+{
+  "username": "$APP_USER",
+  "password": "$vx_pass_md5",
+  "port": $VX_PORT
+}
+EOF
+
+        # 4. 如果有备份，先恢复备份 (会覆盖上面的 setting.json，所以需要后续修正)
         if [[ -n "$VX_RESTORE_URL" ]]; then
             log_info "正在恢复备份数据..."
             wget -q -O "$TEMP_DIR/vertex_backup.zip" "$VX_RESTORE_URL"
@@ -261,34 +257,29 @@ install_apps() {
                 local unzip_cmd="unzip -o"
                 [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P $VX_ZIP_PASS"
                 $unzip_cmd "$TEMP_DIR/vertex_backup.zip" -d "$hb/vertex/" >/dev/null || log_warn "备份解压失败，密码错误?"
+                
+                # 恢复备份后，再次修正端口和密码 (防止备份中的旧配置冲突)
+                local settings_file="$hb/vertex/data/setting.json"
+                if [ -f "$settings_file" ]; then
+                    log_info "修正备份文件中的端口与密码..."
+                    jq --arg user "$APP_USER" --arg pass "$vx_pass_md5" \
+                       --argjson port "$VX_PORT" \
+                       '.username = $user | .password = $pass | .port = $port' \
+                       "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
+                fi
             fi
         fi
 
-        # 7. 注入账号密码 (使用 jq 精准修改，模拟参考脚本逻辑)
-        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
-        local settings_file="$hb/vertex/data/setting.json"
-        
-        # 确保 data 目录存在 (防止Vertex启动极慢还没生成)
-        mkdir -p "$hb/vertex/data"
-        
-        if [ -f "$settings_file" ]; then
-            # 文件存在，使用 jq 修改
-            jq --arg user "$APP_USER" --arg pass "$vx_pass_md5" \
-               '.username = $user | .password = $pass' \
-               "$settings_file" > "${settings_file}.tmp" && mv "${settings_file}.tmp" "$settings_file"
-        else
-            # 文件不存在(初始化慢了或全新安装)，直接创建
-            cat > "$settings_file" << EOF
-{
-  "username": "$APP_USER",
-  "password": "$vx_pass_md5",
-  "port": 3000
-}
-EOF
-        fi
-        
-        # 8. 最终重启
-        docker start vertex >/dev/null
+        # 5. 清理旧容器并启动 (Host 模式)
+        docker rm -f vertex &>/dev/null || true
+        log_info "正在启动 Vertex (Host 模式)..."
+        docker run -d --name vertex \
+            --network host \
+            -v "$hb/vertex":/vertex \
+            -e TZ=Asia/Shanghai \
+            lswl/vertex:stable >/dev/null
+            
+        # 6. 放行防火墙 (Host模式需要手动放行宿主机端口)
         open_port "$VX_PORT"
     fi
 
@@ -365,7 +356,7 @@ PUB_IP=$(curl -s --max-time 3 https://api.ipify.org || echo "ServerIP")
 
 echo ""
 echo -e "${BLUE}########################################################${NC}"
-echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V3.3)             ${NC}"
+echo -e "${GREEN}          Auto-Seedbox-PT 安装成功! (V3.5)             ${NC}"
 echo -e "${BLUE}########################################################${NC}"
 echo -e "Web 账号: ${YELLOW}$APP_USER${NC}"
 echo -e "Web 密码: ${YELLOW}(您刚才输入的密码)${NC}"
@@ -375,6 +366,7 @@ echo -e "🧩 qBittorrent: ${GREEN}http://$PUB_IP:$QB_WEB_PORT${NC} (核心: v$I
 if [[ "$DO_VX" == "true" ]]; then
     echo -e "🌐 Vertex:      ${GREEN}http://$PUB_IP:$VX_PORT${NC}"
     echo -e "   └─ 初始账号: ${YELLOW}$APP_USER${NC} / ${YELLOW}(同上)${NC}"
+    echo -e "   └─ 网络模式: ${GREEN}Host${NC} (支持 127.0.0.1 连QB)"
     if [[ -n "$VX_RESTORE_URL" ]]; then echo -e "   └─ 状态: ${GREEN}数据已恢复${NC}"; fi
 fi
 if [[ "$DO_FB" == "true" ]]; then
