@@ -58,9 +58,9 @@ log_err() { echo -e "${RED}[ERROR] $1${NC}" >&2; exit 1; }
 
 download_file() {
     local url=$1; local output=$2
-    log_info "正在从网络获取资源: $(basename "$output")"
+    log_info "正在获取资源: $(basename "$output")"
     if ! wget -q --show-progress --retry-connrefused --tries=3 --timeout=30 -O "$output" "$url"; then
-        log_err "文件下载失败！请检查网络连接或链接是否有效。\nURL: $url"
+        log_err "下载失败，请检查网络或 URL: $url"
     fi
 }
 
@@ -70,29 +70,24 @@ print_banner() {
     echo -e "${BLUE}------------------------------------------------${NC}"
 }
 
-# 修正：使用标准的 if 结构，防止 EUID=0 时返回状态码 1 触发 set -e
 check_root() { 
     if [[ $EUID -ne 0 ]]; then
-        log_err "权限不足：请使用 root 用户运行本脚本！"
+        log_err "权限不足：请使用 root 用户运行！"
     fi
 }
 
-# 修正：密码安全性检查
 validate_pass() {
     if [[ ${#1} -lt 8 ]]; then
-        log_err "密码安全性不足：长度必须大于或等于 8 位！当前长度为 ${#1}。"
+        log_err "安全性不足：密码长度必须 ≥ 8 位！当前为 ${#1} 位。"
     fi
 }
 
 wait_for_lock() {
     local max_wait=300; local waited=0
-    log_info "检查系统软件包锁状态..."
     while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || fuser /var/lib/dpkg/lock >/dev/null 2>&1; do
+        log_warn "等待系统包管理器锁释放..."
         sleep 2; waited=$((waited + 2))
-        if [[ $waited -ge $max_wait ]]; then
-            log_warn "等待锁超时，尝试强制继续..."
-            break
-        fi
+        [[ $waited -ge $max_wait ]] && break
     done
 }
 
@@ -108,11 +103,8 @@ get_input_port() {
     while true; do
         read -p "$prompt [默认 $default]: " port < /dev/tty
         port=${port:-$default}
-        if [[ "$port" =~ ^[0-9]+$ ]] && [[ "$port" -ge 1 ]] && [[ "$port" -le 65535 ]]; then
-            echo "$port"
-            return 0
-        fi
-        log_warn "输入无效，请输入 1-65535 之间的数字。"
+        [[ "$port" =~ ^[0-9]+$ ]] && [[ "$port" -ge 1 ]] && [[ "$port" -le 65535 ]] && echo "$port" && return 0
+        log_warn "无效输入，请输入 1-65535 端口号。"
     done
 }
 
@@ -120,21 +112,21 @@ get_input_port() {
 
 uninstall() {
     local mode=$1
-    print_banner "执行卸载流程"
+    print_banner "执行卸载程序"
     read -p "确认要卸载所有组件吗？ [y/n]: " confirm < /dev/tty
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then exit 0; fi
 
-    log_info "清理原生服务..."
+    log_info "正在停止原生服务..."
     systemctl stop "qbittorrent-nox@root" 2>/dev/null || true
     systemctl disable "qbittorrent-nox@root" 2>/dev/null || true
     rm -f /etc/systemd/system/qbittorrent-nox@.service /usr/bin/qbittorrent-nox
 
-    log_info "移除 Docker 容器..."
+    log_info "正在移除 Docker 容器..."
     if command -v docker >/dev/null; then
         docker rm -f vertex filebrowser 2>/dev/null || true
     fi
 
-    log_info "还原系统优化..."
+    log_info "正在恢复系统环境..."
     systemctl stop asp-tune.service 2>/dev/null || true
     systemctl disable asp-tune.service 2>/dev/null || true
     rm -f /etc/systemd/system/asp-tune.service /usr/local/bin/asp-tune.sh /etc/sysctl.d/99-ptbox.conf
@@ -142,7 +134,7 @@ uninstall() {
     sysctl --system || true
 
     if [[ "$mode" == "--purge" ]]; then
-        log_warn "深度清理用户配置..."
+        log_warn "深度清理用户数据..."
         rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/fb.db"
         read -p "是否同步删除下载目录 /root/Downloads ? [y/n]: " del_dl < /dev/tty
         if [[ "$del_dl" =~ ^[Yy]$ ]]; then rm -rf "/root/Downloads"; fi
@@ -242,7 +234,7 @@ install_qbit() {
     if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then cache_val="-1"; threads_val="0"
     else
         local root_disk=$(df /root | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//;s/\/dev\///')
-        if [[ -f "/sys/block/$root_disk/queue/rotational" && "$(cat /sys/block/$root_disk/queue/rotational)" == "0" ]]; then threads_val="16"; fi
+        if [ -f "/sys/block/$root_disk/queue/rotational" ] && [ "$(cat /sys/block/$root_disk/queue/rotational)" == "0" ]; then threads_val="16"; fi
     fi
 
     cat > "$hb/.config/qBittorrent/qBittorrent.conf" << EOF
@@ -282,24 +274,34 @@ EOF
 }
 
 install_apps() {
-    wait_for_lock; apt-get -qq install docker.io -y || log_err "Docker 安装失败。"
+    print_banner "部署 Docker 及应用"
+    wait_for_lock
+    
+    # 解决 APT 依赖冲突的强力逻辑
+    if ! apt-get -qq install docker.io -y >/dev/null 2>&1; then
+        log_warn "检测到 APT 依赖冲突，尝试自动修复..."
+        dpkg --configure -a || true
+        apt-get install -f -y || true
+        apt-get install docker.io -y || log_err "Docker 自动修复失败，请手动运行 'apt-get install docker.io' 排查冲突。"
+    fi
+
     local hb="/root"
     if [[ "$DO_VX" == "true" ]]; then
-        print_banner "部署 Vertex (Smart-Polling 模式)"
+        print_banner "部署 Vertex (Smart-Polling)"
         mkdir -p "$hb/vertex/data" && chmod -R 777 "$hb/vertex"
         docker rm -f vertex &>/dev/null || true
         log_info "启动 Vertex 容器..."
         docker run -d --name vertex -p $VX_PORT:3000 -v "$hb/vertex":/vertex -e TZ=Asia/Shanghai lswl/vertex:stable
         
-        log_info "监控内部结构生成..."
+        log_info "正在监控内部结构生成..."
         local wait_count=0
         while true; do
             if [[ -f "$hb/vertex/data/setting.json" ]] && [[ -d "$hb/vertex/data/rule" ]]; then
-                log_info "检测到原生结构已就绪。"
+                log_info "结构就绪。"
                 break
             fi
             sleep 1; wait_count=$((wait_count+1))
-            if [[ $wait_count -ge 60 ]]; then log_warn "初始化超时，强制继续。"; break; fi
+            if [[ $wait_count -ge 60 ]]; then log_warn "检测超时，强制继续。"; break; fi
         done
         
         docker stop vertex || true
@@ -314,7 +316,7 @@ install_apps() {
         local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
         local set_file="$hb/vertex/data/setting.json"
         if [[ -f "$set_file" ]]; then
-            log_info "写入 Vertex 配置..."
+            log_info "注入配置..."
             jq --arg u "$APP_USER" --arg p "$vx_pass_md5" --argjson pt 3000 \
                '.username = $u | .password = $p | .port = $pt' "$set_file" > "${set_file}.tmp" && \
                mv "${set_file}.tmp" "$set_file"
@@ -338,9 +340,8 @@ EOF
     fi
 }
 
-# ================= 5. 主流程控制 =================
+# ================= 5. 入口及交互逻辑 =================
 
-# 参数预判
 case "${1:-}" in
     --uninstall) uninstall "";;
     --purge) uninstall "--purge";;
@@ -351,12 +352,12 @@ while getopts "u:p:c:q:vftod:k:" opt; do
 done
 
 check_root
-# 修正：避免 [[ -n ]] 直接在全局作用域触发 set -e
+
 if [[ -n "$APP_PASS" ]]; then
     validate_pass "$APP_PASS"
 fi
 
-print_banner "系统初始化"
+print_banner "初始化环境"
 wait_for_lock; export DEBIAN_FRONTEND=noninteractive; apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool >/dev/null
 
 if [[ -z "$APP_PASS" ]]; then
@@ -371,13 +372,13 @@ fi
 if [[ "$CUSTOM_PORT" == "true" ]]; then
     echo -e "${BLUE}=======================================${NC}"
     QB_WEB_PORT=$(get_input_port "qBit WebUI" 8080); QB_BT_PORT=$(get_input_port "qBit BT监听" 20000)
-    if [[ "$DO_VX" == "true" ]]; then VX_PORT=$(get_input_port "Vertex" 3000); fi
-    if [[ "$DO_FB" == "true" ]]; then FB_PORT=$(get_input_port "FileBrowser" 8081); fi
+    [[ "$DO_VX" == "true" ]] && VX_PORT=$(get_input_port "Vertex" 3000)
+    [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
 fi
 
 install_qbit
-if [[ "$DO_VX" == "true" || "$DO_FB" == "true" ]]; then install_apps; fi
-if [[ "$DO_TUNE" == "true" ]]; then optimize_system; fi
+[[ "$DO_VX" == "true" || "$DO_FB" == "true" ]] && install_apps
+[[ "$DO_TUNE" == "true" ]] && optimize_system
 
 PUB_IP=$(curl -s --max-time 5 https://api.ipify.org || echo "ServerIP")
 
@@ -398,4 +399,4 @@ if [[ "$DO_FB" == "true" ]]; then
     echo -e "📁 FileBrowser: ${GREEN}http://$PUB_IP:$FB_PORT${NC}"
 fi
 echo -e "${BLUE}========================================================${NC}"
-[[ "$DO_TUNE" == "true" ]] && echo -e "${YELLOW}提示: 深度持久化优化已生效。${NC}"
+[[ "$DO_TUNE" == "true" ]] && echo -e "${YELLOW}提示: 深度优化已应用。建议 reboot 物理机以完成磁盘调度器切换。${NC}"
