@@ -524,7 +524,7 @@ install_qbit() {
     # 【修复要点1】：强制注入 [LegalNotice] 免除首次启动交互式拦截
     # 【修复要点2】：严格遵循 Qt 大小写规范，将协议开关键名统一修正为 BitTorrent\ 
     
-   cat > "$config_file" << EOF
+cat > "$config_file" << EOF
 [LegalNotice]
 Accepted=true
 EOF
@@ -533,7 +533,6 @@ EOF
         cat >> "$config_file" << EOF
 [Preferences]
 Downloads\SavePath=$HB/Downloads/
-Session\MemoryWorkingSetLimit=$cache_val
 WebUI\Password_PBKDF2="$pass_hash"
 WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$APP_USER
@@ -544,32 +543,28 @@ WebUI\HostHeaderValidation=false
 WebUI\CSRFProtection=false
 WebUI\HTTPS\Enabled=false
 Connection\PortRangeMin=$QB_BT_PORT
-Connection\GlobalDLLimit=-1
-Connection\GlobalUPLimit=-1
 Queueing\QueueingEnabled=false
-Advanced\AnnounceToAllTrackers=true
-Advanced\AnnounceToAllTiers=true
-Bittorrent\DHT=false
-Bittorrent\PeX=false
-Bittorrent\LSD=false
-Bittorrent\MaxConnecs=-1
-Bittorrent\MaxConnecsPerTorrent=-1
-Bittorrent\MaxUploads=-1
-Bittorrent\MaxUploadsPerTorrent=-1
-Bittorrent\MaxRatioAction=0
-Bittorrent\MaxRatio=-1
-Bittorrent\MaxSeedingTime=-1
+
+[BitTorrent]
+Session\MemoryWorkingSetLimit=$cache_val
+Session\GlobalMaxConnections=-1
+Session\MaxConnectionsPerTorrent=-1
+Session\GlobalMaxUploads=-1
+Session\MaxUploadsPerTorrent=-1
+Session\DHTEnabled=false
+Session\PeXEnabled=false
+Session\LSDEnabled=false
+Session\AnnounceToAllTrackers=true
+Session\AnnounceToAllTiers=true
 EOF
 
         if [[ "$TUNE_MODE" == "1" ]]; then
             cat >> "$config_file" << EOF
-Connection\MaxHalfOpenConnections=500
-Advanced\SendBufferWatermark=10240
-Advanced\SendBufferLowWatermark=3072
-Advanced\SendBufferTOSMark=2
+Session\SendBufferWatermark=10240
+Session\SendBufferLowWatermark=3072
 EOF
         fi
-
+        
     else
         # 4.x AIO 逻辑
         if [[ "$is_ssd" == "true" ]]; then 
@@ -658,67 +653,24 @@ install_apps() {
     if [[ "$DO_VX" == "true" ]]; then
         print_banner "部署 Vertex (智能轮询)"
         
+        # 仅创建最基础的 data 根目录，绝不预先创建 rule/script 等子目录
         mkdir -p "$HB/vertex/data"
         chmod 777 "$HB/vertex/data"
         
         docker rm -f vertex &>/dev/null || true
         
-        local need_init=true
         if [[ -n "$VX_RESTORE_URL" ]]; then
             log_info "下载备份数据..."
             download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.zip"
             local unzip_cmd="unzip -o"
             [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P\"$VX_ZIP_PASS\""
             eval "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$HB/vertex/\"" || true
-            need_init=false
-        elif [[ -f "$HB/vertex/data/setting.json" ]]; then
-             log_info "检测到已有配置，跳过初始化等待..."
-             need_init=false
-        fi
-
-        log_info "启动 Vertex 容器..."
-        docker run -d --name vertex \
-            --restart unless-stopped \
-            -p $VX_PORT:3000 \
-            -v "$HB/vertex":/vertex \
-            -e TZ=Asia/Shanghai \
-            lswl/vertex:stable
-
-        if [[ "$need_init" == "true" ]]; then
-            log_info "等待 Vertex 容器初始化目录结构及释放默认规则 (可能需要 10-30 秒)..."
-            local count=0
-            # 放宽等待时间到 60 秒，留给 I/O 较慢的机器充分的初始化时间
-            while [ ! -d "$HB/vertex/data/rule" ] && [ $count -lt 60 ]; do
-                echo -n "."
-                sleep 2
-                count=$((count + 2))
-            done
-            echo ""
             
-            # 智能检测是否生成，如果没有生成则自动预创建（兜底干预）
-            if [[ ! -d "$HB/vertex/data/rule" ]]; then
-                log_warn "Vertex 目录初始化似乎超时，正在触发智能干预，手动补全核心目录结构..."
-                mkdir -p "$HB/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
-                mkdir -p "$HB/vertex/data/douban/set" "$HB/vertex/data/watch/set"
-                mkdir -p "$HB/vertex/data/rule/"{delete,link,rss,race,raceSet}
-            else
-                log_info "Vertex 初始目录结构已自动生成就绪。"
-            fi
-            
-            log_info "修正目录权限..."
-            chown -R "$APP_USER:$APP_USER" "$HB/vertex"
-            chmod -R 777 "$HB/vertex/data"
-            
-            # 确保权限变更后容器能正常接管，执行一次重启
-            docker restart vertex >/dev/null 2>&1
-        else
-            log_info "智能修正备份中的下载器配置..."
-            docker stop vertex >/dev/null 2>&1 || true
-            local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
-            
+            local gw=$(ip -4 route show default | cut -d' ' -f3 | head -1 || echo "172.17.0.1")
             shopt -s nullglob
             local client_files=("$HB/vertex/data/client/"*.json)
             if [ ${#client_files[@]} -gt 0 ]; then
+                log_info "智能修正备份中的下载器配置..."
                 for client in "${client_files[@]}"; do
                     if grep -q "qBittorrent" "$client"; then
                          jq --arg url "http://$gw:$QB_WEB_PORT" \
@@ -728,11 +680,11 @@ install_apps() {
                             "$client" > "${client}.tmp" && mv "${client}.tmp" "$client" || true
                     fi
                 done
-                log_info "连接信息已修正。"
             fi
             shopt -u nullglob
         fi
 
+        # 【核心魔法】：仅预设 setting.json 注入密码，不干扰其他目录
         local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
         local set_file="$HB/vertex/data/setting.json"
         
@@ -753,8 +705,16 @@ EOF
         
         chown -R "$APP_USER:$APP_USER" "$HB/vertex"
 
-        log_info "拉起 Vertex 服务..."
-        docker start vertex >/dev/null 2>&1 || true
+        # 启动容器。容器读取 setting.json 秒速生效密码，并在后台异步解压 rule 等规则文件。
+        # 脚本零等待，直接放行！
+        log_info "启动 Vertex 容器，后台将自动释放默认规则..."
+        docker run -d --name vertex \
+            --restart unless-stopped \
+            -p $VX_PORT:3000 \
+            -v "$HB/vertex":/vertex \
+            -e TZ=Asia/Shanghai \
+            lswl/vertex:stable >/dev/null 2>&1
+            
         open_port "$VX_PORT"
     fi
 
@@ -764,10 +724,10 @@ EOF
         chown -R "$APP_USER:$APP_USER" "$HB/.config/filebrowser" "$HB/fb.db"
 
         docker rm -f filebrowser &>/dev/null || true
-        docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config init
-        docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin
+        docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config init >/dev/null 2>&1
+        docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin >/dev/null 2>&1
         
-        docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/fb.db":/database/filebrowser.db -v "$HB/.config/filebrowser":/config -p $FB_PORT:80 filebrowser/filebrowser:latest
+        docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/fb.db":/database/filebrowser.db -v "$HB/.config/filebrowser":/config -p $FB_PORT:80 filebrowser/filebrowser:latest >/dev/null 2>&1
         open_port "$FB_PORT"
     fi
 }
@@ -831,7 +791,10 @@ if [[ "$DO_TUNE" == "true" ]]; then
         echo -e "${RED} ⚠️ 仅推荐用于 大内存/G口/SSD 的独立服务器进行极限刷流抢种！${NC}"
         echo -e "${RED} ⚠️ 家用 NAS、或者只想保种刷流请终止安装，使用 -m 2 重新运行！${NC}"
         echo -e "${RED}================================================================${NC}"
-        sleep 5
+        # 增加可见的倒计时，消除卡死错觉
+        echo -n -e "${YELLOW}请仔细阅读以上警告，5秒后将自动继续: ${NC}"
+        for i in {5..1}; do echo -n "$i... "; sleep 1; done
+        echo ""
     else
         echo -e "${GREEN} -> 当前系统调优模式: 2 (均衡保种)${NC}"
     fi
