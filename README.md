@@ -95,8 +95,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 | `-f` | ⭕ | 部署 FileBrowser 文件管理器 (Docker) | `-f` |
 | `-t` | ⭕ | 启用系统级内核与网络调优 (强烈推荐) | `-t` |
 | `-o` | ⭕ | 自定义端口 (进入终端交互式询问) | `-o` |
-| `-d` | ⭕ | Vertex 备份 ZIP 远程下载直链 | `-d http://...` |
-| `-k` | ⭕ | Vertex 备份 ZIP 解压密码 (若无则不填) | `-k 123456` |
+| `-d` | ⭕ | Vertex 备份 zip或tar.gz 远程下载直链 | `-d http://...` |
+| `-k` | ⭕ | Vertex 备份 zip或tar.gz 解压密码 (若无则不填) | `-k 123456` |
 
 ---
 
