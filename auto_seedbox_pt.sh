@@ -479,7 +479,6 @@ install_qbit() {
     else
         INSTALLED_MAJOR_VER="5"
         log_info "锁定大版本: 5.x (绑定 libtorrent v2.0.x 支持 mmap)"
-        
         local tag=""
         if [[ "$QB_VER_REQ" == "5" || "$QB_VER_REQ" == "latest" ]]; then
             tag=$(curl -sL "$api" | jq -r '.[0].tag_name')
@@ -491,7 +490,6 @@ install_qbit() {
             fi
             log_info "正在拉取指定版本: $tag"
         fi
-        
         local fname="${arch}-qbittorrent-nox"
         url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${fname}"
     fi
@@ -499,12 +497,10 @@ install_qbit() {
     download_file "$url" "/usr/bin/qbittorrent-nox"
     chmod +x /usr/bin/qbittorrent-nox
     
-    # 强制停止可能残留的服务进程并删除锁文件，防止因竞态覆写配置文件
     log_info "环境清理，挂起旧进程..."
     systemctl stop "qbittorrent-nox@$APP_USER" 2>/dev/null || true
     pkill -9 -u "$APP_USER" qbittorrent-nox 2>/dev/null || true
     
-    # 创建必要的目录
     mkdir -p "$HB/.config/qBittorrent" "$HB/Downloads" "$HB/.local/share/qBittorrent/BT_backup"
     chown -R "$APP_USER:$APP_USER" "$HB/.config/qBittorrent" "$HB/Downloads" "$HB/.local"
 
@@ -512,69 +508,16 @@ install_qbit() {
     rm -f "$HB/.local/share/qBittorrent/BT_backup/.lock"
     
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; salt = os.urandom(16); dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), salt, 100000); print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})')" "$APP_PASS")
-    
-    local root_disk=$(df $HB | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//;s/\/dev\///')
-    local is_ssd=false
-    if [ -f "/sys/block/$root_disk/queue/rotational" ] && [ "$(cat /sys/block/$root_disk/queue/rotational)" == "0" ]; then is_ssd=true; fi
-
-    local threads_val="4"; local cache_val="$QB_CACHE"
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
+    local cache_val="$QB_CACHE"
 
-    # ======== 完全隔离 4.x 和 5.x 的配置生成逻辑 ========
-    
-cat > "$config_file" << EOF
+    # ======== 终极配置写入逻辑 (严格绑定 [Preferences] 节点) ========
+    cat > "$config_file" << EOF
 [LegalNotice]
 Accepted=true
-EOF
 
-    if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then 
-        cat >> "$config_file" << EOF
 [Preferences]
 Downloads\SavePath=$HB/Downloads/
-WebUI\Password_PBKDF2="$pass_hash"
-WebUI\Port=$QB_WEB_PORT
-WebUI\Username=$APP_USER
-WebUI\AuthSubnetWhitelist=127.0.0.1/32, 172.16.0.0/12, 10.0.0.0/8, 192.168.0.0/16, 172.17.0.0/16
-WebUI\AuthSubnetWhitelistEnabled=true
-WebUI\LocalHostAuthenticationEnabled=false
-WebUI\HostHeaderValidation=false
-WebUI\CSRFProtection=false
-WebUI\HTTPS\Enabled=false
-Connection\PortRangeMin=$QB_BT_PORT
-Queueing\QueueingEnabled=false
-
-[BitTorrent]
-Session\MemoryWorkingSetLimit=$cache_val
-Session\GlobalMaxConnections=-1
-Session\MaxConnectionsPerTorrent=-1
-Session\GlobalMaxUploads=-1
-Session\MaxUploadsPerTorrent=-1
-Session\DHTEnabled=false
-Session\PeXEnabled=false
-Session\LSDEnabled=false
-Session\AnnounceToAllTrackers=true
-Session\AnnounceToAllTiers=true
-EOF
-
-        if [[ "$TUNE_MODE" == "1" ]]; then
-            cat >> "$config_file" << EOF
-Session\SendBufferWatermark=10240
-Session\SendBufferLowWatermark=3072
-EOF
-        fi
-        
-    else
-        # 4.x AIO 逻辑
-        if [[ "$is_ssd" == "true" ]]; then 
-            threads_val=$([[ "$TUNE_MODE" == "1" ]] && echo "32" || echo "16")
-        else
-            threads_val=$([[ "$TUNE_MODE" == "1" ]] && echo "8" || echo "4")
-        fi
-        
-        cat >> "$config_file" << EOF
-[Preferences]
-Downloads\SavePath=$HB/Downloads/
-Downloads\DiskWriteCacheSize=$cache_val
 WebUI\Password_PBKDF2="$pass_hash"
 WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$APP_USER
@@ -590,7 +533,6 @@ Connection\GlobalUPLimit=-1
 Queueing\QueueingEnabled=false
 Advanced\AnnounceToAllTrackers=true
 Advanced\AnnounceToAllTiers=true
-Session\AsyncIOThreadsCount=$threads_val
 Bittorrent\DHT=false
 Bittorrent\PeX=false
 Bittorrent\LSD=false
@@ -603,13 +545,25 @@ Bittorrent\MaxRatio=-1
 Bittorrent\MaxSeedingTime=-1
 EOF
 
-        if [[ "$TUNE_MODE" == "1" ]]; then
-            cat >> "$config_file" << EOF
-Connection\MaxHalfOpenConnections=500
-Session\SendBufferWatermark=10240
-Session\SendBufferLowWatermark=3072
+    # 针对版本的特定参数
+    if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then 
+        cat >> "$config_file" << EOF
+Advanced\MemoryWorkingSetLimit=$cache_val
 EOF
-        fi
+    else
+        cat >> "$config_file" << EOF
+Downloads\DiskWriteCacheSize=$cache_val
+EOF
+    fi
+
+    # 极限模式的高级网络缓冲区参数
+    if [[ "$TUNE_MODE" == "1" ]]; then
+        cat >> "$config_file" << EOF
+Connection\MaxHalfOpenConnections=500
+Advanced\SendBufferWatermark=10240
+Advanced\SendBufferLowWatermark=3072
+Advanced\SendBufferTOSMark=2
+EOF
     fi
 
     sed -i '/^$/d' "$config_file"
@@ -642,7 +596,7 @@ install_apps() {
         log_info "使用官方脚本安装 Docker..."
         curl -fsSL https://get.docker.com -o get-docker.sh
         sh get-docker.sh >/dev/null 2>&1 || {
-            log_warn "官方脚本安装失败，尝试回退到 APT 安装..."
+            log_warn "尝试回退到 APT 安装..."
             apt-get update && apt-get install -y docker.io
         }
         rm -f get-docker.sh
@@ -651,61 +605,14 @@ install_apps() {
     if [[ "$DO_VX" == "true" ]]; then
         print_banner "部署 Vertex (智能轮询)"
         
-        # 仅创建最基础的 data 根目录，绝不预先创建 rule/script 等子目录
+        # 1. 保证 data 目录绝对为空，这是触发初始化的先决条件！
         mkdir -p "$HB/vertex/data"
         chmod 777 "$HB/vertex/data"
         
         docker rm -f vertex &>/dev/null || true
         
-        if [[ -n "$VX_RESTORE_URL" ]]; then
-            log_info "下载备份数据..."
-            download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.zip"
-            local unzip_cmd="unzip -o"
-            [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P\"$VX_ZIP_PASS\""
-            eval "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$HB/vertex/\"" || true
-            
-            local gw=$(ip -4 route show default | cut -d' ' -f3 | head -1 || echo "172.17.0.1")
-            shopt -s nullglob
-            local client_files=("$HB/vertex/data/client/"*.json)
-            if [ ${#client_files[@]} -gt 0 ]; then
-                log_info "智能修正备份中的下载器配置..."
-                for client in "${client_files[@]}"; do
-                    if grep -q "qBittorrent" "$client"; then
-                         jq --arg url "http://$gw:$QB_WEB_PORT" \
-                            --arg user "$APP_USER" \
-                            --arg pass "$APP_PASS" \
-                            '.clientUrl = $url | .username = $user | .password = $pass' \
-                            "$client" > "${client}.tmp" && mv "${client}.tmp" "$client" || true
-                    fi
-                done
-            fi
-            shopt -u nullglob
-        fi
-
-        # 【核心魔法】：仅预设 setting.json 注入密码，不干扰其他目录
-        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
-        local set_file="$HB/vertex/data/setting.json"
-        
-        if [[ -f "$set_file" ]]; then
-            log_info "同步面板访问配置..."
-            jq --arg u "$APP_USER" --arg p "$vx_pass_md5" --argjson pt 3000 \
-                '.username = $u | .password = $p | .port = $pt' "$set_file" > "${set_file}.tmp" && \
-                mv "${set_file}.tmp" "$set_file"
-        else
-            cat > "$set_file" << EOF
-{
-  "username": "$APP_USER",
-  "password": "$vx_pass_md5",
-  "port": 3000
-}
-EOF
-        fi
-        
-        chown -R "$APP_USER:$APP_USER" "$HB/vertex"
-
-        # 启动容器。容器读取 setting.json 秒速生效密码，并在后台异步解压 rule 等规则文件。
-        # 脚本零等待，直接放行！
-        log_info "启动 Vertex 容器，后台将自动释放默认规则..."
+        # 2. 拉起容器，让其在空目录中释放 rule 等内置规则文件
+        log_info "启动 Vertex 并释放核心规则结构..."
         docker run -d --name vertex \
             --restart unless-stopped \
             -p $VX_PORT:3000 \
@@ -713,6 +620,35 @@ EOF
             -e TZ=Asia/Shanghai \
             lswl/vertex:stable >/dev/null 2>&1
             
+        # 3. 带有加载动画的等待逻辑 (等待内置文件生成)
+        echo -n -e "${YELLOW}等待容器初始化内部规则数据 ${NC}"
+        local count=0
+        while [ ! -d "$HB/vertex/data/rule" ] && [ $count -lt 60 ]; do
+            echo -n "."
+            sleep 2
+            count=$((count + 2))
+        done
+        echo -e "${GREEN} [就绪]${NC}"
+        
+        # 4. 目录就绪后，挂起容器，注入我们的设置！
+        docker stop vertex >/dev/null 2>&1 || true
+        
+        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
+        local set_file="$HB/vertex/data/setting.json"
+        
+        cat > "$set_file" << EOF
+{
+  "username": "$APP_USER",
+  "password": "$vx_pass_md5",
+  "port": 3000
+}
+EOF
+        # 修正权限以防万一
+        chown -R "$APP_USER:$APP_USER" "$HB/vertex"
+        
+        # 5. 重新拉起已被我们注入密码的容器
+        log_info "重启 Vertex 服务..."
+        docker start vertex >/dev/null 2>&1 || true
         open_port "$VX_PORT"
     fi
 
