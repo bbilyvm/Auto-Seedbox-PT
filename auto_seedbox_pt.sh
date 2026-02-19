@@ -470,7 +470,7 @@ EOF
 # ================= 5. 应用部署逻辑 =================
 
 install_qbit() {
-    print_banner "部署 qBittorrent"
+    print_banner "部署 qBittorrent (WebAPI 自动化注入版)"
     local arch=$(uname -m); local url=""
     local api="https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases"
     
@@ -481,7 +481,6 @@ install_qbit() {
     else
         INSTALLED_MAJOR_VER="5"
         log_info "锁定大版本: 5.x (绑定 libtorrent v2.0.x 支持 mmap)"
-        
         local tag=""
         if [[ "$QB_VER_REQ" == "5" || "$QB_VER_REQ" == "latest" ]]; then
             tag=$(curl -sL "$api" | jq -r '.[0].tag_name')
@@ -493,7 +492,6 @@ install_qbit() {
             fi
             log_info "正在拉取指定版本: $tag"
         fi
-        
         local fname="${arch}-qbittorrent-nox"
         url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${fname}"
     fi
@@ -501,7 +499,7 @@ install_qbit() {
     download_file "$url" "/usr/bin/qbittorrent-nox"
     chmod +x /usr/bin/qbittorrent-nox
     
-    # 强制清理环境
+    log_info "环境清理，挂起旧进程..."
     systemctl stop "qbittorrent-nox@$APP_USER" 2>/dev/null || true
     pkill -9 -u "$APP_USER" qbittorrent-nox 2>/dev/null || true
     
@@ -512,29 +510,19 @@ install_qbit() {
     rm -f "$HB/.local/share/qBittorrent/BT_backup/.lock"
     
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; salt = os.urandom(16); dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), salt, 100000); print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})')" "$APP_PASS")
-    
     local root_disk=$(df $HB | tail -1 | awk '{print $1}' | sed 's/[0-9]*$//;s/\/dev\///')
     local is_ssd=false
     if [ -f "/sys/block/$root_disk/queue/rotational" ] && [ "$(cat /sys/block/$root_disk/queue/rotational)" == "0" ]; then is_ssd=true; fi
-
     local threads_val="4"; local cache_val="$QB_CACHE"
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
-    # 注入免责协议，防止后台阻塞
+    # 1. 基础引导配置（仅保留最基础的存活要素，确保引擎能被启动）
     cat > "$config_file" << EOF
 [LegalNotice]
 Accepted=true
-EOF
 
-    # ======== 完全回退到你原脚本的配置生成逻辑 ========
-    if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then 
-        cache_val="-1" 
-        threads_val="0"
-        
-        cat >> "$config_file" << EOF
 [Preferences]
 Downloads\SavePath=$HB/Downloads/
-Downloads\DiskWriteCacheSize=$cache_val
 WebUI\Password_PBKDF2="$pass_hash"
 WebUI\Port=$QB_WEB_PORT
 WebUI\Username=$APP_USER
@@ -545,97 +533,8 @@ WebUI\HostHeaderValidation=false
 WebUI\CSRFProtection=false
 WebUI\HTTPS\Enabled=false
 Connection\PortRangeMin=$QB_BT_PORT
-Connection\GlobalDLLimit=-1
-Connection\GlobalUPLimit=-1
-Connection\MaxConnections=-1
-Connection\MaxConnectionsPerTorrent=-1
-Connection\MaxUploads=-1
-Connection\MaxUploadsPerTorrent=-1
-Queueing\QueueingEnabled=false
-Advanced\AnnounceToAllTrackers=true
-Advanced\AnnounceToAllTiers=true
-Advanced\AsyncIOThreadsCount=$threads_val
 EOF
 
-        if [[ "$TUNE_MODE" == "1" ]]; then
-            cat >> "$config_file" << EOF
-Advanced\DiskIOType=0
-Advanced\DiskIOReadMode=0
-Advanced\DiskIOWriteMode=0
-Advanced\HashingThreadsCount=0
-Connection\MaxHalfOpenConnections=500
-Advanced\SendBufferWatermark=10240
-Advanced\SendBufferLowWatermark=3072
-Advanced\SendBufferTOSMark=2
-EOF
-        fi
-
-        cat >> "$config_file" << EOF
-
-[BitTorrent]
-Bittorrent\DHTEnabled=false
-Bittorrent\PeXEnabled=false
-Bittorrent\LSDEnabled=false
-Bittorrent\MaxRatioAction=0
-Bittorrent\MaxRatio=-1
-Bittorrent\MaxSeedingTime=-1
-EOF
-
-    else
-        # 4.x AIO 逻辑
-        if [[ "$is_ssd" == "true" ]]; then 
-            threads_val=$([[ "$TUNE_MODE" == "1" ]] && echo "32" || echo "16")
-        else
-            threads_val=$([[ "$TUNE_MODE" == "1" ]] && echo "8" || echo "4")
-        fi
-        
-        cat >> "$config_file" << EOF
-[Preferences]
-Downloads\SavePath=$HB/Downloads/
-Downloads\DiskWriteCacheSize=$cache_val
-WebUI\Password_PBKDF2="$pass_hash"
-WebUI\Port=$QB_WEB_PORT
-WebUI\Username=$APP_USER
-WebUI\AuthSubnetWhitelist=127.0.0.1/32, 172.16.0.0/12, 10.0.0.0/8, 192.168.0.0/16, 172.17.0.0/16
-WebUI\AuthSubnetWhitelistEnabled=true
-WebUI\LocalHostAuthenticationEnabled=false
-WebUI\HostHeaderValidation=false
-WebUI\CSRFProtection=false
-WebUI\HTTPS\Enabled=false
-Connection\PortRangeMin=$QB_BT_PORT
-Connection\GlobalDLLimit=-1
-Connection\GlobalUPLimit=-1
-Connection\MaxConnections=-1
-Connection\MaxConnectionsPerTorrent=-1
-Connection\MaxUploads=-1
-Connection\MaxUploadsPerTorrent=-1
-Queueing\QueueingEnabled=false
-Advanced\AnnounceToAllTrackers=true
-Advanced\AnnounceToAllTiers=true
-Session\AsyncIOThreadsCount=$threads_val
-EOF
-
-        if [[ "$TUNE_MODE" == "1" ]]; then
-            cat >> "$config_file" << EOF
-Connection\MaxHalfOpenConnections=500
-Session\SendBufferWatermark=10240
-Session\SendBufferLowWatermark=3072
-EOF
-        fi
-
-        cat >> "$config_file" << EOF
-
-[BitTorrent]
-Bittorrent\DHTEnabled=false
-Bittorrent\PeXEnabled=false
-Bittorrent\LSDEnabled=false
-Bittorrent\MaxRatioAction=0
-Bittorrent\MaxRatio=-1
-Bittorrent\MaxSeedingTime=-1
-EOF
-    fi
-
-    sed -i '/^$/d' "$config_file"
     chown "$APP_USER:$APP_USER" "$config_file"
     
     cat > /etc/systemd/system/qbittorrent-nox@.service << EOF
@@ -655,6 +554,58 @@ EOF
     systemctl daemon-reload && systemctl enable "qbittorrent-nox@$APP_USER" >/dev/null 2>&1
     systemctl start "qbittorrent-nox@$APP_USER"
     open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
+
+    # 2. 轮询等待 WebUI 就绪
+    log_info "等待 qBittorrent 引擎初始化并提供 Web API 接口..."
+    local api_ready=false
+    for i in {1..20}; do
+        if curl -s -f "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/version" >/dev/null; then
+            api_ready=true
+            break
+        fi
+        sleep 1
+    done
+
+    # 3. 强制 WebAPI 参数注入
+    if [[ "$api_ready" == "true" ]]; then
+        log_info "引擎就绪，正在通过官方 API 强推防泄漏与极限调优参数..."
+        
+        # 登录并获取 Cookie
+        curl -s -c "$TEMP_DIR/qb_cookie.txt" --data "username=$APP_USER&password=$APP_PASS" "http://127.0.0.1:$QB_WEB_PORT/api/v2/auth/login" >/dev/null
+        
+        # 组装基础 JSON 载荷
+        local json_payload="{\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"max_connecs\":-1,\"max_connecs_per_torrent\":-1,\"max_uploads\":-1,\"max_uploads_per_torrent\":-1,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"queueing_enabled\":false"
+        
+        # 追加极限网络参数
+        if [[ "$TUNE_MODE" == "1" ]]; then
+            json_payload="${json_payload},\"max_half_open_connections\":500,\"send_buffer_watermark\":10240,\"send_buffer_low_watermark\":3072,\"send_buffer_tos_mark\":2"
+        fi
+        
+        # 追加版本差异参数
+        if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
+            json_payload="${json_payload},\"memory_working_set_limit\":$cache_val"
+        else
+            if [[ "$is_ssd" == "true" ]]; then 
+                threads_val=$([[ "$TUNE_MODE" == "1" ]] && echo "32" || echo "16")
+            else
+                threads_val=$([[ "$TUNE_MODE" == "1" ]] && echo "8" || echo "4")
+            fi
+            json_payload="${json_payload},\"disk_cache\":$cache_val,\"async_io_threads\":$threads_val"
+        fi
+        json_payload="${json_payload}}"
+
+        # 发送设置请求
+        local http_code=$(curl -s -o /dev/null -w "%{http_code}" -b "$TEMP_DIR/qb_cookie.txt" -X POST --data-urlencode "json=$json_payload" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/setPreferences")
+        
+        if [[ "$http_code" == "200" ]]; then
+            log_info "API 配置下发完毕！引擎防泄漏与底层网络已锁定极速状态。"
+        else
+            log_warn "API 参数注入失败 (HTTP 状态码: $http_code)，请在 WebUI 中手动确认高级设置。"
+        fi
+        rm -f "$TEMP_DIR/qb_cookie.txt"
+    else
+        log_err "qBittorrent WebUI 未能在 20 秒内响应，请检查端口是否冲突或系统日志。"
+    fi
 }
 
 install_apps() {
@@ -714,7 +665,7 @@ install_apps() {
             echo ""
             
             if [[ ! -d "$HB/vertex/data/rule" ]]; then
-                log_warn "Vertex 目录初始化似乎超时，正在触发智能干预，手动补全核心目录结构..."
+                log_warn "Vertex 目录初始化结束，正在触发智能干预，手动补全核心目录结构..."
                 mkdir -p "$HB/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
                 mkdir -p "$HB/vertex/data/douban/set" "$HB/vertex/data/watch/set"
                 mkdir -p "$HB/vertex/data/rule/"{delete,link,rss,race,raceSet}
