@@ -89,7 +89,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 | `-u` | ✅ | WebUI 及面板用户名 | `-u admin` |
 | `-p` | ✅ | 统一密码（必须 ≥ 8 位） | `-p mysecurepass` |
 | `-m` | ⭕ | **调优模式**：`1`(极限刷流) 或 `2`(均衡保种)。默认 `1` | `-m 1` |
-| `-q` | ⭕ | qBit 版本：`4.3.9`、`5`、`latest` 或 `5.0.4` 等确切版本 | `-q 5.0.4` |
+| `-q` | ⭕ | qBit 版本（默认5.0.4）：`4.3.9`、`5`、`latest` 或 `5.0.4` 等确切版本 | `-q 5.0.4` |
 | `-c` | ⭕ | 缓存大小(MB)。*注：仅对 4.x 有效，5.x 使用 mmap 将被忽略* | `-c 2048` |
 | `-v` | ⭕ | 部署 Vertex 面板 (Docker) | `-v` |
 | `-f` | ⭕ | 部署 FileBrowser 文件管理器 (Docker) | `-f` |
@@ -122,6 +122,10 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 **Q: 到底选 v4 还是 v5？**
 
 **A:** HDD，小内存等、挂几千个种子赚魔力（保种刷流），选 **v4 (4.3.9)**，内存控制极其优秀。大硬盘、大带宽、配合 Vertex 抢首发刷流，选 **v5 (如5.0.4)**，性能上限极高，相信我目前5.X版本极限刷流比之前的4.3.9版本更加适合，当然对机器要求也高一些。
+
+**Q: 为什么极限模式没有自动安装BBRX或者BBR-PLUS？**
+
+**A:** 极限模式（默认或者m=1），会自动判断系统是否有BBRX或者BBR-PLUS，如果用将会自动启用，但是不会自动安装，防止出现兼容问题，如果需要请自行安装，脚本自行寻找。
 
 **Q: 为什么装了 v5，没跑多少流量系统内存就快满了？**
 
