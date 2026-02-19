@@ -521,8 +521,6 @@ install_qbit() {
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
     # ======== 完全隔离 4.x 和 5.x 的配置生成逻辑 ========
-    # 【修复要点1】：强制注入 [LegalNotice] 免除首次启动交互式拦截
-    # 【修复要点2】：严格遵循 Qt 大小写规范，将协议开关键名统一修正为 BitTorrent\ 
     
 cat > "$config_file" << EOF
 [LegalNotice]
@@ -783,6 +781,7 @@ if [[ "$TUNE_MODE" == "1" && $mem_gb_chk -lt 4 ]]; then
 fi
 
 # 警告提示逻辑
+# 警告提示逻辑
 if [[ "$DO_TUNE" == "true" ]]; then
     if [[ "$TUNE_MODE" == "1" ]]; then
         echo -e "${RED}================================================================${NC}"
@@ -791,9 +790,14 @@ if [[ "$DO_TUNE" == "true" ]]; then
         echo -e "${RED} ⚠️ 仅推荐用于 大内存/G口/SSD 的独立服务器进行极限刷流抢种！${NC}"
         echo -e "${RED} ⚠️ 家用 NAS、或者只想保种刷流请终止安装，使用 -m 2 重新运行！${NC}"
         echo -e "${RED}================================================================${NC}"
-        # 增加可见的倒计时，消除卡死错觉
-        echo -n -e "${YELLOW}请仔细阅读以上警告，5秒后将自动继续: ${NC}"
-        for i in {5..1}; do echo -n "$i... "; sleep 1; done
+        
+        # 改为加载动画形式，延长至 10 秒，消除催促感，留足阅读时间
+        echo -n -e "${YELLOW}请仔细阅读以上警告，系统环境检测与初始化准备中 ${NC}"
+        for i in {1..10}; do 
+            echo -n "."
+            sleep 1
+        done
+        echo -e "${GREEN} [就绪]${NC}"
         echo ""
     else
         echo -e "${GREEN} -> 当前系统调优模式: 2 (均衡保种)${NC}"
