@@ -363,6 +363,7 @@ uninstall() {
 
 optimize_system() {
     print_banner "系统内核优化 (ASP-Tuned)"
+    echo -e "  ${CYAN}▶ 正在深度接管系统调度与网络协议栈...${NC}"
     
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     local rmem_max=$((mem_kb * 1024 / 2))
@@ -373,10 +374,11 @@ optimize_system() {
     local backlog=65535
     local syn_backlog=65535
     
+    # 智能穿透侦测 BBR 版本
     local avail_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "bbr cubic reno")
     local kernel_name=$(uname -r | tr '[:upper:]' '[:lower:]')
     local target_cc="bbr"
-    local ui_cc="bbr" # 用于 Dashboard 显示
+    local ui_cc="bbr"
 
     if [[ "$TUNE_MODE" == "1" ]]; then
         rmem_max=1073741824 
@@ -387,16 +389,13 @@ optimize_system() {
         backlog=250000
         syn_backlog=819200
         
-        # 穿透识别：既查可用列表，也查内核名称
+        # BBRv3 / BBRx 穿透识别逻辑
         if echo "$avail_cc" | grep -qw "bbrx" || echo "$kernel_name" | grep -q "bbrx"; then
-            # 如果系统里真叫bbrx就用bbrx，如果只是内核名带bbrx但模块叫bbr，就写入bbr
             target_cc=$(echo "$avail_cc" | grep -qw "bbrx" && echo "bbrx" || echo "bbr")
             ui_cc="bbrx"
-            log_info "已穿透侦测到 BBRx 自定义内核，自动挂载抢跑算法！"
         elif echo "$avail_cc" | grep -qw "bbr3" || echo "$kernel_name" | grep -qE "bbr3|bbrv3"; then
             target_cc=$(echo "$avail_cc" | grep -qw "bbr3" && echo "bbr3" || echo "bbr")
             ui_cc="bbrv3"
-            log_info "已穿透侦测到 BBRv3 内核，自动挂载高级拥塞算法！"
         fi
         
         if [ ! -f /etc/asp_original_governor ]; then
@@ -410,6 +409,7 @@ optimize_system() {
         dirty_bg_ratio=5
     fi
 
+    # 1. 写入极限 sysctl 配置
     cat > /etc/sysctl.d/99-ptbox.conf << EOF
 fs.file-max = 1048576
 fs.nr_open = 1048576
@@ -431,8 +431,8 @@ net.ipv4.tcp_timestamps = 1
 net.ipv4.tcp_sack = 1
 net.ipv4.tcp_low_latency = 1
 EOF
-    sysctl --system >/dev/null 2>&1 || true
 
+    # 2. 解除文件描述符封印
     if ! grep -q "Auto-Seedbox-PT" /etc/security/limits.conf; then
         cat >> /etc/security/limits.conf << EOF
 # Auto-Seedbox-PT Limits
@@ -443,6 +443,7 @@ root soft nofile 1048576
 EOF
     fi
 
+    # 3. 构造网卡与 CPU 调度器动态脚本
     cat > /usr/local/bin/asp-tune.sh << EOF_SCRIPT
 #!/bin/bash
 IS_VIRT=\$(systemd-detect-virt 2>/dev/null || echo "none")
@@ -492,8 +493,28 @@ RemainAfterExit=yes
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable asp-tune.service >/dev/null 2>&1
-    systemctl start asp-tune.service || true
-    echo -e " ${GREEN}[√]${NC} 核心优化 (模式 $TUNE_MODE, TCP: $ui_cc) 注入完毕！"
+
+    # 核心应用环节 (带 UI 动画)
+    execute_with_spinner "注入百万级并发与高吞吐网络参数" sysctl --system
+    execute_with_spinner "重载网卡队列与 CPU 性能调度器" systemctl start asp-tune.service || true
+    
+    # 构建装逼矩阵面板
+    local rmem_mb=$((rmem_max / 1024 / 1024))
+    echo ""
+    echo -e "  ${PURPLE}[⚡ ASP-Tuned 核心调优矩阵已挂载]${NC}"
+    echo -e "  ${CYAN}├─${NC} 拥塞控制算法 : ${GREEN}${ui_cc}${NC} (智能穿透匹配)"
+    echo -e "  ${CYAN}├─${NC} 全局并发上限 : ${YELLOW}1,048,576${NC} (解除 Socket 封印)"
+    echo -e "  ${CYAN}├─${NC} TCP 缓冲上限 : ${YELLOW}${rmem_mb} MB${NC} (极限吞吐保障)"
+    echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (防 I/O 阻塞)"
+    if [[ "$TUNE_MODE" == "1" ]]; then
+        echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${RED}performance${NC} (锁定最高主频)"
+    else
+        echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${GREEN}ondemand/schedutil${NC} (动态节能)"
+    fi
+    echo -e "  ${CYAN}└─${NC} 磁盘与网卡流 : ${YELLOW}I/O Multi-Queue & TX-Queue 扩容${NC}"
+    echo ""
+
+    echo -e " ${GREEN}[√] 底层内核引擎 (Mode $TUNE_MODE) 已全面接管！${NC}"
 }
 
 # ================= 5. 应用部署逻辑 =================
