@@ -374,7 +374,9 @@ optimize_system() {
     local syn_backlog=65535
     
     local avail_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "bbr cubic reno")
+    local kernel_name=$(uname -r | tr '[:upper:]' '[:lower:]')
     local target_cc="bbr"
+    local ui_cc="bbr" # 用于 Dashboard 显示
 
     if [[ "$TUNE_MODE" == "1" ]]; then
         rmem_max=1073741824 
@@ -385,12 +387,16 @@ optimize_system() {
         backlog=250000
         syn_backlog=819200
         
-        if echo "$avail_cc" | grep -qw "bbrx"; then
-            target_cc="bbrx"
-            log_info "已侦测到 BBRx 自定义内核，自动挂载抢跑算法！"
-        elif echo "$avail_cc" | grep -qw "bbr3"; then
-            target_cc="bbr3"
-            log_info "已侦测到 BBRv3 内核，自动挂载高级拥塞算法！"
+        # 穿透识别：既查可用列表，也查内核名称
+        if echo "$avail_cc" | grep -qw "bbrx" || echo "$kernel_name" | grep -q "bbrx"; then
+            # 如果系统里真叫bbrx就用bbrx，如果只是内核名带bbrx但模块叫bbr，就写入bbr
+            target_cc=$(echo "$avail_cc" | grep -qw "bbrx" && echo "bbrx" || echo "bbr")
+            ui_cc="bbrx"
+            log_info "已穿透侦测到 BBRx 自定义内核，自动挂载抢跑算法！"
+        elif echo "$avail_cc" | grep -qw "bbr3" || echo "$kernel_name" | grep -qE "bbr3|bbrv3"; then
+            target_cc=$(echo "$avail_cc" | grep -qw "bbr3" && echo "bbr3" || echo "bbr")
+            ui_cc="bbrv3"
+            log_info "已穿透侦测到 BBRv3 内核，自动挂载高级拥塞算法！"
         fi
         
         if [ ! -f /etc/asp_original_governor ]; then
@@ -487,7 +493,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable asp-tune.service >/dev/null 2>&1
     systemctl start asp-tune.service || true
-    echo -e " ${GREEN}[√]${NC} 核心优化 (模式 $TUNE_MODE, TCP: $target_cc) 注入完毕！"
+    echo -e " ${GREEN}[√]${NC} 核心优化 (模式 $TUNE_MODE, TCP: $ui_cc) 注入完毕！"
 }
 
 # ================= 5. 应用部署逻辑 =================
