@@ -50,7 +50,7 @@
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5 -m 1 -v -f -t
 ```
 
-### 2. 均衡养老（保种刷流 首选）
+### 2. 均衡模式（保种刷流 首选）
 安装最稳的 qBittorrent 4.3.9 + 附加组件，启用 **均衡保种模式**（稳定低负载）：
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 4.3.9 -m 2 -v -f -t
@@ -65,7 +65,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 ### 4. 精准版本 & 自定义端口（交互模式）
 精准安装 `5.0.4` 版本，并使用 `-o` 参数在安装时手动指定各个组件的端口：
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5.0.4 -m 2 -v -f -t -o
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5.0.4 -v -f -t -o
 ```
 
 ### 5. 基础极简版（仅 qBittorrent）
