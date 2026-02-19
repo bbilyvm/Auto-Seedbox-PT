@@ -746,14 +746,14 @@ fi
 
 check_root
 
-print_banner "环境初始化"
+print_banner "环境初始化与前置检测"
 
-# =============== 内存硬性防呆机制 ===============
+# =============== 1. 内存硬性防呆机制 ===============
 mem_kb_chk=$(grep MemTotal /proc/meminfo | awk '{print $2}')
 mem_gb_chk=$((mem_kb_chk / 1024 / 1024))
 if [[ "$TUNE_MODE" == "1" && $mem_gb_chk -lt 4 ]]; then
     echo -e "${RED}================================================================${NC}"
-    echo -e "${RED} [警告] 内存防呆机制触发！检测到系统物理内存不足 4GB (当前: ${mem_gb_chk}GB)！${NC}"
+    echo -e "${RED} [拦截] 内存防呆机制触发！检测到系统物理内存不足 4GB (当前: ${mem_gb_chk}GB)！${NC}"
     echo -e "${RED} ⚠️ 极限模式 (分配 1GB TCP 发送/接收缓冲区) 会导致本机瞬间 OOM 死机！${NC}"
     echo -e "${RED} ⚠️ 已为您强制降级为 Balanced (均衡保种) 模式！${NC}"
     echo -e "${RED}================================================================${NC}"
@@ -761,8 +761,7 @@ if [[ "$TUNE_MODE" == "1" && $mem_gb_chk -lt 4 ]]; then
     sleep 3
 fi
 
-# 警告提示逻辑
-# 警告提示逻辑
+# =============== 2. 警告提示逻辑 ===============
 if [[ "$DO_TUNE" == "true" ]]; then
     if [[ "$TUNE_MODE" == "1" ]]; then
         echo -e "${RED}================================================================${NC}"
@@ -771,15 +770,8 @@ if [[ "$DO_TUNE" == "true" ]]; then
         echo -e "${RED} ⚠️ 仅推荐用于 大内存/G口/SSD 的独立服务器进行极限刷流抢种！${NC}"
         echo -e "${RED} ⚠️ 家用 NAS、或者只想保种刷流请终止安装，使用 -m 2 重新运行！${NC}"
         echo -e "${RED}================================================================${NC}"
-        
-        # 改为加载动画形式，延长至 10 秒，消除催促感，留足阅读时间
-        echo -n -e "${YELLOW}请仔细阅读以上警告，系统环境检测与初始化准备中 ${NC}"
-        for i in {1..10}; do 
-            echo -n "."
-            sleep 1
-        done
-        echo -e "${GREEN} [就绪]${NC}"
-        echo ""
+        echo -e "${YELLOW}请仔细阅读以上高危警告，3秒后开始执行底层环境检测...${NC}"
+        sleep 3
     else
         echo -e "${GREEN} -> 当前系统调优模式: 2 (均衡保种)${NC}"
     fi
@@ -788,9 +780,31 @@ fi
 if [[ -z "$APP_USER" ]]; then APP_USER="admin"; fi
 if [[ -n "$APP_PASS" ]]; then validate_pass "$APP_PASS"; fi
 
-wait_for_lock; export DEBIAN_FRONTEND=noninteractive
-apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool iptables >/dev/null
+echo ""
+# =============== 3. 显性化实时初始化进度 ===============
+log_info "-> [1/4] 检测系统基础架构与资源..."
+arch_chk=$(uname -m); kernel_chk=$(uname -r)
+echo -e "   架构: ${arch_chk} | 内核: ${kernel_chk} | 物理内存: ${mem_gb_chk} GB"
+sleep 1 # 给定极短缓冲，提升视觉流畅度
 
+log_info "-> [2/4] 验证管理员权限与网络连通性..."
+check_root
+if ping -c 1 -W 2 223.5.5.5 >/dev/null 2>&1 || ping -c 1 -W 2 8.8.8.8 >/dev/null 2>&1; then
+    echo -e "   网络连通性: 正常"
+else
+    log_warn "   网络连通性异常，后续依赖拉取可能失败！"
+fi
+
+log_info "-> [3/4] 检查系统包管理器状态 (等待 apt/dpkg 锁释放)..."
+wait_for_lock
+echo -e "   包管理器: 就绪 (无占用)"
+
+log_info "-> [4/4] 更新软件源并安装核心依赖 (curl, jq, unzip, python3...)"
+export DEBIAN_FRONTEND=noninteractive
+apt-get -qq update && apt-get -qq install -y curl wget jq unzip python3 net-tools ethtool iptables >/dev/null
+echo -e "${GREEN} [就绪] 基础环境初始化与依赖部署完成！${NC}\n"
+
+# =============== 4. 补充交互式密码输入 ===============
 if [[ -z "$APP_PASS" ]]; then
     while true; do
         echo -n "请输入 Web 面板统一密码 (必须 ≥ 8 位): "
