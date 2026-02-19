@@ -47,31 +47,37 @@
 ### 1. 极致抢跑（独立服务器 / 刷流首选）
 安装最新版 qBittorrent v5 + 附加组件，启用 **极限刷流模式**（锁定 CPU，暴增网络并发）：
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p 你的强密码 -q 5 -m 1 -v -f -t
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5 -m 1 -v -f -t
 ```
 
-### 2. 均衡养老（VPS / NAS 首选）
+### 2. 均衡养老（保种刷流 首选）
 安装最稳的 qBittorrent 4.3.9 + 附加组件，启用 **均衡保种模式**（稳定低负载）：
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p 你的强密码 -q 4.3.9 -m 2 -v -f -t
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 4.3.9 -m 2 -v -f -t
 ```
 
-### 3. 精准版本 & 自定义端口（交互模式）
+### 3. 自定义端口（交互模式）
+使用 `-o` 参数在安装时手动指定各个组件的端口：
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -m 2 -v -f -t -o
+```
+
+### 4. 精准版本 & 自定义端口（交互模式）
 精准安装 `5.0.4` 版本，并使用 `-o` 参数在安装时手动指定各个组件的端口：
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p 你的强密码 -q 5.0.4 -m 2 -v -f -t -o
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5.0.4 -m 2 -v -f -t -o
 ```
 
-### 4. 基础极简版（仅 qBittorrent）
+### 5. 基础极简版（仅 qBittorrent）
 不装面板和文件管理器，纯净部署 qBit 和基础系统优化：
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p 你的强密码 -q 5 -m 2 -t
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5 -m 2 -t
 ```
 
-### 5. 一键搬家（恢复 Vertex 数据）
+### 6. 一键搬家（恢复 Vertex 数据模式）
 从旧服务器迁移，自动下载备份包并解压覆盖：
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u admin -p 你的强密码 -m 2 -v -f -t -d "https://your-server.com/backup/vertex.zip" -k "zip_password"
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -m 2 -v -f -t -d "https://your-server.com/backup/vertex.zip" -k "zip_password"
 ```
 
 ---
