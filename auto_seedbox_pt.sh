@@ -1,21 +1,9 @@
 #!/bin/bash
 
 ################################################################################
-# Auto-Seedbox-PT (ASP) v1.6.3
+# Auto-Seedbox-PT (ASP) v1.6.3 (Ultimate Fix Edition)
 # qBittorrent  + libtorrent  + Vertex + FileBrowser 一键安装脚本
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
-# 参数说明:
-#   -u : 用户名 (用于运行服务和登录WebUI)
-#   -p : 密码（必须 ≥ 8 位）
-#   -c : qBittorrent 缓存大小 (MiB, 仅4.x有效, 5.x使用mmap)
-#   -q : qBittorrent 版本 (4.3.9, 5, latest, 或精确小版本如 5.0.4)
-#   -v : 安装 Vertex
-#   -f : 安装 FileBrowser
-#   -t : 启用系统内核优化（强烈推荐）
-#   -m : 调优模式 (1: 极限刷流 / 2: 均衡保种) [默认 1]
-#   -o : 自定义端口 (会提示输入)
-#   -d : Vertex data 目录 ZIP 下载链接 (可选)
-#   -k : Vertex data ZIP 解压密码 (可选)
 ################################################################################
 
 set -euo pipefail
@@ -571,7 +559,6 @@ EOF
         # 登录并获取 Cookie
         curl -s -c "$TEMP_DIR/qb_cookie.txt" --data "username=$APP_USER&password=$APP_PASS" "http://127.0.0.1:$QB_WEB_PORT/api/v2/auth/login" >/dev/null
         
-        # [严谨修复] 官方最新底层 API 的精确拼写为 max_connec 及 max_connec_per_torrent (无 "s")
         # 组装基础 JSON 载荷
         local json_payload="{\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"max_connec\":-1,\"max_connec_per_torrent\":-1,\"max_uploads\":-1,\"max_uploads_per_torrent\":-1,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"queueing_enabled\":false"
         
@@ -627,65 +614,46 @@ install_apps() {
     if [[ "$DO_VX" == "true" ]]; then
         print_banner "部署 Vertex (智能轮询)"
         
-        # 恢复初始版本最稳定的容器自身驱动架构逻辑
-        mkdir -p "$HB/vertex/data"
-        chmod 777 "$HB/vertex/data"
         docker rm -f vertex &>/dev/null || true
         
+        # 1. 无论全新还是恢复，先铺设标准目录骨架
+        log_info "预先构建 Vertex 核心目录树..."
+        mkdir -p "$HB/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
+        mkdir -p "$HB/vertex/data/douban/set" "$HB/vertex/data/watch/set"
+        mkdir -p "$HB/vertex/data/rule/"{delete,link,rss,race,raceSet}
+
+        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
+        local set_file="$HB/vertex/data/setting.json"
         local need_init=true
+
+        # 2. 判断并处理数据恢复
         if [[ -n "$VX_RESTORE_URL" ]]; then
             log_info "下载备份数据..."
             download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.zip"
             local unzip_cmd="unzip -o"
             [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P\"$VX_ZIP_PASS\""
-            eval "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$HB/vertex/\"" || true
+            
+            # 【修复点】精确解压到 data/ 目录下
+            eval "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$HB/vertex/data/\"" || true
             need_init=false
-        elif [[ -f "$HB/vertex/data/setting.json" ]]; then
-             log_info "检测到已有配置，跳过初始化等待..."
-             need_init=false
+        elif [[ -f "$set_file" ]]; then
+            log_info "检测到本地已有配置，执行原地接管..."
+            need_init=false
         fi
 
-        log_info "启动 Vertex 容器..."
-        docker run -d --name vertex \
-            --restart unless-stopped \
-            -p $VX_PORT:3000 \
-            -v "$HB/vertex":/vertex \
-            -e TZ=Asia/Shanghai \
-            lswl/vertex:stable >/dev/null 2>&1
-
-        # 让容器先跑起来释放文件，脚本进行安全等待
-        echo -n -e "${YELLOW}等待 Vertex 容器初始化目录结构 ${NC}"
-        sleep 5
-
-        if [[ "$need_init" == "true" ]]; then
-            local count=0
-            while [ ! -d "$HB/vertex/data/rule" ] && [ $count -lt 30 ]; do
-                echo -n "."
-                sleep 1
-                count=$((count + 1))
-            done
-            echo ""
+        # 3. 静态注入配置 (完全在 Docker 启动前完成，避开竞态读写)
+        if [[ "$need_init" == "false" ]]; then
+            log_info "正在为您智能桥接备份数据与当前环境..."
             
-            if [[ ! -d "$HB/vertex/data/rule" ]]; then
-                log_warn "Vertex 目录初始化结束，正在触发智能干预，手动补全核心目录结构..."
-                mkdir -p "$HB/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
-                mkdir -p "$HB/vertex/data/douban/set" "$HB/vertex/data/watch/set"
-                mkdir -p "$HB/vertex/data/rule/"{delete,link,rss,race,raceSet}
-            else
-                log_info "Vertex 初始目录结构已自动生成就绪。"
+            # 修正 Web 面板的账号密码，不破坏原有其他设定
+            if [[ -f "$set_file" ]]; then
+                jq --arg u "$APP_USER" --arg p "$vx_pass_md5" \
+                   '.username = $u | .password = $p' "$set_file" > "${set_file}.tmp" && \
+                   mv "${set_file}.tmp" "$set_file" || true
             fi
-            
-            log_info "修正目录权限..."
-            chown -R "$APP_USER:$APP_USER" "$HB/vertex"
-            chmod -R 777 "$HB/vertex/data"
-            
-            # 停止容器以防写入冲突
-            docker stop vertex >/dev/null 2>&1 || true
-        else
-            log_info "智能修正备份中的下载器配置..."
-            docker stop vertex >/dev/null 2>&1 || true
+
+            # 修正 Client (下载器) 的 IP 网关和密码
             local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
-            
             shopt -s nullglob
             local client_files=("$HB/vertex/data/client/"*.json)
             if [ ${#client_files[@]} -gt 0 ]; then
@@ -698,21 +666,12 @@ install_apps() {
                             "$client" > "${client}.tmp" && mv "${client}.tmp" "$client" || true
                     fi
                 done
-                log_info "连接信息已修正。"
+                log_info "已成功将历史下载器连接引导至新网关 ($gw)。"
             fi
             shopt -u nullglob
-        fi
-
-        # 强制精准注入用户指定的 Web 密码，彻底修复无效 bug
-        local vx_pass_md5=$(echo -n "$APP_PASS" | md5sum | awk '{print $1}')
-        local set_file="$HB/vertex/data/setting.json"
-        
-        if [[ -f "$set_file" ]]; then
-            log_info "同步面板访问配置..."
-            jq --arg u "$APP_USER" --arg p "$vx_pass_md5" \
-                '.username = $u | .password = $p' "$set_file" > "${set_file}.tmp" && \
-                mv "${set_file}.tmp" "$set_file" || true
         else
+            # 全新安装：直接生成初始配置文件
+            log_info "全新安装，生成初始 setting.json..."
             cat > "$set_file" << EOF
 {
   "username": "$APP_USER",
@@ -721,11 +680,20 @@ install_apps() {
 }
 EOF
         fi
-        
-        chown -R "$APP_USER:$APP_USER" "$HB/vertex"
 
-        log_info "重启 Vertex 服务..."
-        docker start vertex >/dev/null 2>&1 || true
+        # 4. 暴力上锁权限，杜绝容器内读写失败
+        chown -R "$APP_USER:$APP_USER" "$HB/vertex"
+        chmod -R 777 "$HB/vertex/data"
+
+        # 5. 配置全部就绪，一次性直接拉起容器，废弃所有休眠和等待！
+        log_info "环境桥接完毕，正式启动 Vertex 容器..."
+        docker run -d --name vertex \
+            --restart unless-stopped \
+            -p $VX_PORT:3000 \
+            -v "$HB/vertex":/vertex \
+            -e TZ=Asia/Shanghai \
+            lswl/vertex:stable >/dev/null 2>&1
+
         open_port "$VX_PORT"
     fi
 
