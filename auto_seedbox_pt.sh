@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Auto-Seedbox-PT (ASP) v1.6 (Extreme Tuning & Version Lock Edition)
+# Auto-Seedbox-PT (ASP) v1.6.1 (Extreme Tuning & Version Lock Edition)
 # qBittorrent  + libtorrent  + Vertex + FileBrowser 一键安装脚本
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
 # 参数说明:
@@ -47,7 +47,6 @@ VX_ZIP_PASS=""
 INSTALLED_MAJOR_VER="5"
 ACTION="install" 
 
-# 默认 Home 目录，稍后动态调整
 HB="/root"
 
 TEMP_DIR=$(mktemp -d -t asp-XXXXXX)
@@ -66,6 +65,7 @@ download_file() {
     local url=$1; local output=$2
     log_info "正在获取资源: $(basename "$output")"
     if [[ "$output" == "/usr/bin/qbittorrent-nox" ]]; then
+        systemctl stop "qbittorrent-nox@$APP_USER" 2>/dev/null || true
         pkill -9 qbittorrent-nox 2>/dev/null || true
         rm -f "$output" 2>/dev/null || true
     fi
@@ -467,8 +467,6 @@ EOF
 
 # ================= 5. 应用部署逻辑 =================
 
-# ================= 5. 应用部署逻辑 =================
-
 install_qbit() {
     print_banner "部署 qBittorrent"
     local arch=$(uname -m); local url=""
@@ -501,12 +499,15 @@ install_qbit() {
     download_file "$url" "/usr/bin/qbittorrent-nox"
     chmod +x /usr/bin/qbittorrent-nox
     
+    # 强制停止可能残留的服务进程并删除锁文件，防止因竞态覆写配置文件
+    log_info "环境清理，挂起旧进程..."
+    systemctl stop "qbittorrent-nox@$APP_USER" 2>/dev/null || true
+    pkill -9 -u "$APP_USER" qbittorrent-nox 2>/dev/null || true
+    
     # 创建必要的目录
     mkdir -p "$HB/.config/qBittorrent" "$HB/Downloads" "$HB/.local/share/qBittorrent/BT_backup"
     chown -R "$APP_USER:$APP_USER" "$HB/.config/qBittorrent" "$HB/Downloads" "$HB/.local"
 
-    # 强制停止可能残留的进程并删除锁文件（解决 QtLockedFile 报错）
-    pkill -9 qbittorrent-nox 2>/dev/null || true
     rm -f "$HB/.config/qBittorrent/qBittorrent.conf.lock"
     rm -f "$HB/.local/share/qBittorrent/BT_backup/.lock"
     
@@ -520,10 +521,16 @@ install_qbit() {
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
     # ======== 完全隔离 4.x 和 5.x 的配置生成逻辑 ========
+    # 【修复要点1】：强制注入 [LegalNotice] 免除首次启动交互式拦截
+    # 【修复要点2】：严格遵循 Qt 大小写规范，将协议开关键名统一修正为 BitTorrent\ 
+    
+    cat > "$config_file" << EOF
+[LegalNotice]
+Accepted=true
+EOF
+
     if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then 
-        # 5.x 禁用内存缓存配置，拥抱 mmap。移除了所有失效的 Advanced 磁盘与异步 IO 参数。
-        # 修正了严重的 [BitTorrent] 节点防泄漏参数层级错误，统一放入 [Preferences] 节点下
-        cat > "$config_file" << EOF
+        cat >> "$config_file" << EOF
 [Preferences]
 Downloads\SavePath=$HB/Downloads/
 WebUI\Password_PBKDF2="$pass_hash"
@@ -545,12 +552,12 @@ Connection\MaxUploadsPerTorrent=-1
 Queueing\QueueingEnabled=false
 Advanced\AnnounceToAllTrackers=true
 Advanced\AnnounceToAllTiers=true
-Bittorrent\DHTEnabled=false
-Bittorrent\PeXEnabled=false
-Bittorrent\LSDEnabled=false
-Bittorrent\MaxRatioAction=0
-Bittorrent\MaxRatio=-1
-Bittorrent\MaxSeedingTime=-1
+BitTorrent\DHTEnabled=false
+BitTorrent\PeXEnabled=false
+BitTorrent\LSDEnabled=false
+BitTorrent\MaxRatioAction=0
+BitTorrent\MaxRatio=-1
+BitTorrent\MaxSeedingTime=-1
 EOF
 
         if [[ "$TUNE_MODE" == "1" ]]; then
@@ -570,7 +577,7 @@ EOF
             threads_val=$([[ "$TUNE_MODE" == "1" ]] && echo "8" || echo "4")
         fi
         
-        cat > "$config_file" << EOF
+        cat >> "$config_file" << EOF
 [Preferences]
 Downloads\SavePath=$HB/Downloads/
 Downloads\DiskWriteCacheSize=$cache_val
@@ -594,12 +601,12 @@ Queueing\QueueingEnabled=false
 Advanced\AnnounceToAllTrackers=true
 Advanced\AnnounceToAllTiers=true
 Session\AsyncIOThreadsCount=$threads_val
-Bittorrent\DHTEnabled=false
-Bittorrent\PeXEnabled=false
-Bittorrent\LSDEnabled=false
-Bittorrent\MaxRatioAction=0
-Bittorrent\MaxRatio=-1
-Bittorrent\MaxSeedingTime=-1
+BitTorrent\DHTEnabled=false
+BitTorrent\PeXEnabled=false
+BitTorrent\LSDEnabled=false
+BitTorrent\MaxRatioAction=0
+BitTorrent\MaxRatio=-1
+BitTorrent\MaxSeedingTime=-1
 EOF
 
         if [[ "$TUNE_MODE" == "1" ]]; then
@@ -629,7 +636,7 @@ LimitNOFILE=1048576
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable "qbittorrent-nox@$APP_USER" >/dev/null 2>&1
-    systemctl restart "qbittorrent-nox@$APP_USER"
+    systemctl start "qbittorrent-nox@$APP_USER"
     open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
 }
 
