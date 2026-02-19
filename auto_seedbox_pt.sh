@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Auto-Seedbox-PT (ASP) v1.2 (Extreme Tuning Edition)
+# Auto-Seedbox-PT (ASP) v1.3 (Extreme Tuning Edition)
 # qBittorrent  + libtorrent  + Vertex + FileBrowser 一键安装脚本
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
 # 参数说明:
@@ -245,10 +245,19 @@ uninstall() {
     
     if [[ "$mode" == "--purge" ]]; then
         log_warn "执行底层状态回滚 (CPU调度器 / 网卡队列 / TCP参数)..."
-        # 恢复 CPU Governor
-        for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-            [ -f "$f" ] && echo "schedutil" > "$f" 2>/dev/null || echo "ondemand" > "$f" 2>/dev/null || true
-        done
+        # 智能恢复 CPU Governor 原始状态
+        if [ -f /etc/asp_original_governor ]; then
+            orig_gov=$(cat /etc/asp_original_governor)
+            for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+                [ -f "$f" ] && echo "$orig_gov" > "$f" 2>/dev/null || true
+            done
+            rm -f /etc/asp_original_governor
+        else
+            for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+                [ -f "$f" ] && echo "ondemand" > "$f" 2>/dev/null || true
+            done
+        fi
+        
         # 恢复常用网卡队列和拥塞窗口
         ETH=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
         if [ -n "$ETH" ]; then
@@ -330,6 +339,10 @@ optimize_system() {
     local dirty_bg_ratio=5
     local backlog=65535
     local syn_backlog=65535
+    
+    # 动态探测系统可用的拥塞控制算法 (Fallback to BBR)
+    local avail_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "bbr cubic reno")
+    local target_cc="bbr"
 
     # 1=极限模式, 2=均衡模式
     if [[ "$TUNE_MODE" == "1" ]]; then
@@ -340,6 +353,21 @@ optimize_system() {
         dirty_bg_ratio=10
         backlog=250000
         syn_backlog=819200
+        
+        # BBR 极限算法自动挂载
+        if echo "$avail_cc" | grep -qw "bbrx"; then
+            target_cc="bbrx"
+            log_warn "已侦测到 BBRx 自定义内核，自动挂载抢跑算法！"
+        elif echo "$avail_cc" | grep -qw "bbr3"; then
+            target_cc="bbr3"
+            log_warn "已侦测到 BBRv3 内核，自动挂载高级拥塞算法！"
+        fi
+        
+        # 保存 CPU Governor 原始状态用于无损恢复
+        if [ ! -f /etc/asp_original_governor ]; then
+            cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null > /etc/asp_original_governor || echo "ondemand" > /etc/asp_original_governor
+        fi
+        
         log_warn "已启用极限内核参数，为 G口/万兆网卡 提供最大化吞吐支持！"
     else
         # 均衡模式限制上限
@@ -357,7 +385,7 @@ vm.swappiness = 1
 vm.dirty_ratio = $dirty_ratio
 vm.dirty_background_ratio = $dirty_bg_ratio
 net.core.default_qdisc = fq
-net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_congestion_control = $target_cc
 net.core.somaxconn = 65535
 net.core.netdev_max_backlog = $backlog
 net.ipv4.tcp_max_syn_backlog = $syn_backlog
@@ -435,7 +463,7 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable asp-tune.service >/dev/null 2>&1
     systemctl start asp-tune.service || true
-    log_info "系统核心优化 (模式 $TUNE_MODE) 已应用完毕。"
+    log_info "系统核心优化 (模式 $TUNE_MODE, TCP: $target_cc) 已应用完毕。"
 }
 
 # ================= 5. 应用部署逻辑 =================
@@ -706,6 +734,19 @@ fi
 check_root
 
 print_banner "环境初始化"
+
+# =============== 内存硬性防呆机制 ===============
+mem_kb_chk=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+mem_gb_chk=$((mem_kb_chk / 1024 / 1024))
+if [[ "$TUNE_MODE" == "1" && $mem_gb_chk -lt 4 ]]; then
+    echo -e "${RED}================================================================${NC}"
+    echo -e "${RED} [警告] 内存防呆机制触发！检测到系统物理内存不足 4GB (当前: ${mem_gb_chk}GB)！${NC}"
+    echo -e "${RED} ⚠️ 极限模式 (分配 1GB TCP 发送/接收缓冲区) 会导致本机瞬间 OOM 死机！${NC}"
+    echo -e "${RED} ⚠️ 已为您强制降级为 Balanced (均衡保种) 模式！${NC}"
+    echo -e "${RED}================================================================${NC}"
+    TUNE_MODE="2"
+    sleep 3
+fi
 
 # 警告提示逻辑
 if [[ "$DO_TUNE" == "true" ]]; then
