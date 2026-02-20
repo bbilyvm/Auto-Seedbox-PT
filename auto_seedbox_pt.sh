@@ -212,7 +212,6 @@ setup_user() {
 # ================= 3. 深度卸载逻辑 =================
 
 uninstall() {
-    local mode=$1
     echo -e "${CYAN}=================================================${NC}"
     echo -e "${CYAN}        执行深度卸载流程 (含系统回滚)            ${NC}"
     echo -e "${CYAN}=================================================${NC}"
@@ -235,13 +234,10 @@ uninstall() {
     
     target_home=$(eval echo ~$target_user 2>/dev/null || echo "/home/$target_user")
 
-    if [[ "$mode" == "--purge" ]]; then
-        log_warn "将清理用户数据并【彻底回滚内核与系统状态】。"
-    else
-        log_info "仅卸载服务，保留用户数据与内核优化。"
-    fi
+    log_warn "将清理用户数据并【彻底回滚内核与系统状态】。"
 
-    read -p "确认要卸载核心组件吗？此操作不可逆！ [y/N]: " confirm < /dev/tty
+    read -p "确认要卸载核心组件吗？此操作不可逆！ [Y/n]: " confirm < /dev/tty
+    confirm=${confirm:-Y}
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then exit 0; fi
 
     execute_with_spinner "停止并移除服务守护进程" sh -c "
@@ -269,36 +265,34 @@ uninstall() {
         [ -f /etc/security/limits.conf ] && sed -i '/# Auto-Seedbox-PT/d' /etc/security/limits.conf || true
     "
     
-    if [[ "$mode" == "--purge" ]]; then
-        log_warn "执行底层状态回滚..."
-        if [ -f /etc/asp_original_governor ]; then
-            orig_gov=$(cat /etc/asp_original_governor)
-            for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-                [ -f "$f" ] && echo "$orig_gov" > "$f" 2>/dev/null || true
-            done
-            rm -f /etc/asp_original_governor
-        else
-            for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
-                [ -f "$f" ] && echo "ondemand" > "$f" 2>/dev/null || true
-            done
-        fi
-        
-        ETH=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
-        if [ -n "$ETH" ]; then
-            ifconfig "$ETH" txqueuelen 1000 2>/dev/null || true
-        fi
-        DEF_ROUTE=$(ip -o -4 route show to default | head -n1)
-        if [[ -n "$DEF_ROUTE" ]]; then
-            ip route change $DEF_ROUTE initcwnd 10 initrwnd 10 2>/dev/null || true
-        fi
-        sysctl -w net.core.rmem_max=212992 >/dev/null 2>&1 || true
-        sysctl -w net.core.wmem_max=212992 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_rmem="4096 87380 6291456" >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_wmem="4096 16384 4194304" >/dev/null 2>&1 || true
-        sysctl -w vm.dirty_ratio=20 >/dev/null 2>&1 || true
-        sysctl -w vm.dirty_background_ratio=10 >/dev/null 2>&1 || true
-        sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+    log_warn "执行底层状态回滚..."
+    if [ -f /etc/asp_original_governor ]; then
+        orig_gov=$(cat /etc/asp_original_governor)
+        for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            [ -f "$f" ] && echo "$orig_gov" > "$f" 2>/dev/null || true
+        done
+        rm -f /etc/asp_original_governor
+    else
+        for f in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do
+            [ -f "$f" ] && echo "ondemand" > "$f" 2>/dev/null || true
+        done
     fi
+    
+    ETH=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
+    if [ -n "$ETH" ]; then
+        ifconfig "$ETH" txqueuelen 1000 2>/dev/null || true
+    fi
+    DEF_ROUTE=$(ip -o -4 route show to default | head -n1)
+    if [[ -n "$DEF_ROUTE" ]]; then
+        ip route change $DEF_ROUTE initcwnd 10 initrwnd 10 2>/dev/null || true
+    fi
+    sysctl -w net.core.rmem_max=212992 >/dev/null 2>&1 || true
+    sysctl -w net.core.wmem_max=212992 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_rmem="4096 87380 6291456" >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_wmem="4096 16384 4194304" >/dev/null 2>&1 || true
+    sysctl -w vm.dirty_ratio=20 >/dev/null 2>&1 || true
+    sysctl -w vm.dirty_background_ratio=10 >/dev/null 2>&1 || true
+    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
     
     execute_with_spinner "清理防火墙规则遗留" sh -c "
         if command -v ufw >/dev/null && systemctl is-active --quiet ufw; then
@@ -333,28 +327,27 @@ uninstall() {
     systemctl daemon-reload
     sysctl --system >/dev/null 2>&1 || true
 
-    if [[ "$mode" == "--purge" ]]; then
-        log_warn "清理配置文件..."
-        if [[ -d "$target_home" ]]; then
-             rm -rf "$target_home/.config/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser"
-             log_info "已清理 $target_home 下的配置文件。"
-             
-             if [[ -d "$target_home/Downloads" ]]; then
-                 echo -e "${YELLOW}=================================================${NC}"
-                 log_warn "检测到可能包含大量数据的目录: $target_home/Downloads"
-                 read -p "是否连同已下载的种子数据一并彻底删除？此操作不可逆！ [y/N]: " del_data < /dev/tty
-                 if [[ "$del_data" =~ ^[Yy]$ ]]; then
-                     rm -rf "$target_home/Downloads"
-                     log_info "💣 已彻底删除 $target_home/Downloads 数据目录。"
-                 else
-                     log_info "🛡️ 已为您安全保留 $target_home/Downloads 数据目录。"
-                 fi
-                 echo -e "${YELLOW}=================================================${NC}"
+    log_warn "清理配置文件..."
+    if [[ -d "$target_home" ]]; then
+         rm -rf "$target_home/.config/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser"
+         log_info "已清理 $target_home 下的配置文件。"
+         
+         if [[ -d "$target_home/Downloads" ]]; then
+             echo -e "${YELLOW}=================================================${NC}"
+             log_warn "检测到可能包含大量数据的目录: $target_home/Downloads"
+             read -p "是否连同已下载的种子数据一并彻底删除？此操作不可逆！ [Y/n]: " del_data < /dev/tty
+             del_data=${del_data:-Y}
+             if [[ "$del_data" =~ ^[Yy]$ ]]; then
+                 rm -rf "$target_home/Downloads"
+                 log_info "💣 已彻底删除 $target_home/Downloads 数据目录。"
+             else
+                 log_info "🛡️ 已为您安全保留 $target_home/Downloads 数据目录。"
              fi
-        fi
-        rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser"
-        log_warn "建议重启服务器 (reboot) 以彻底清理内核内存驻留。"
+             echo -e "${YELLOW}=================================================${NC}"
+         fi
     fi
+    rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser"
+    log_warn "建议重启服务器 (reboot) 以彻底清理内核内存驻留。"
     
     log_info "卸载完成。"
     exit 0
@@ -818,7 +811,6 @@ while [[ $# -gt 0 ]]; do
     key="$1"
     case $key in
         --uninstall) ACTION="uninstall"; shift ;;
-        --purge) ACTION="purge"; shift ;;
         -u|--user) APP_USER="$2"; shift 2 ;;
         -p|--pass) APP_PASS="$2"; shift 2 ;;
         -c|--cache) QB_CACHE="$2"; CACHE_SET_BY_USER=true; shift 2 ;;
@@ -839,9 +831,7 @@ if [[ "$TUNE_MODE" != "1" && "$TUNE_MODE" != "2" ]]; then
 fi
 
 if [[ "$ACTION" == "uninstall" ]]; then
-    uninstall ""
-elif [[ "$ACTION" == "purge" ]]; then
-    uninstall "--purge"
+    uninstall
 fi
 
 # ================= 开始全新极客仪表盘 UI =================
@@ -852,7 +842,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}========================================================${NC}"
-echo -e "${PURPLE}   ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v1.6.6 ✦${NC}"
+echo -e "${PURPLE}   ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v1.7.0 ✦${NC}"
 echo -e "${PURPLE}   ✦ 作者：Supcutie Github：yimouleng/Auto-Seedbox-PT ✦${NC}"
 echo -e "${BLUE}========================================================${NC}"
 echo ""
