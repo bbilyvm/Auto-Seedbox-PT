@@ -598,7 +598,7 @@ install_qbit() {
     local cache_val="$QB_CACHE"
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
-    # 【核心修复1】: 强制将底层 IO 策略写入初始化配置文件，绕开 API 刷新失败的 Bug
+    # 【终极修复1】: C++枚举值矫正: Type 2 是 POSIX
     cat > "$config_file" << EOF
 [LegalNotice]
 Accepted=true
@@ -620,7 +620,7 @@ EOF
     if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
         local hash_threads=$(nproc 2>/dev/null || echo 2)
         cat >> "$config_file" << EOF
-Session\DiskIOType=1
+Session\DiskIOType=2
 Session\DiskIOReadMode=0
 Session\DiskIOWriteMode=0
 Session\MemoryWorkingSetLimit=$cache_val
@@ -663,7 +663,7 @@ EOF
     done
     printf "\e[?25h"
 
-    # 3. WebAPI 参数注入 (仅处理不需要重启的普通参数)
+    # 3. WebAPI 参数注入
     if [[ "$api_ready" == "true" ]]; then
         printf "\r\033[K ${GREEN}[√]${NC} API 引擎握手成功！开始下发高级底层配置... \n"
         
@@ -677,7 +677,11 @@ EOF
             json_payload="${json_payload},\"max_connec\":2000,\"max_connec_per_torrent\":100,\"max_uploads\":500,\"max_uploads_per_torrent\":20,\"max_half_open_connections\":50,\"send_buffer_watermark\":10240,\"send_buffer_low_watermark\":3072,\"send_buffer_tos_mark\":2,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":8"
         fi
         
-        if [[ "$INSTALLED_MAJOR_VER" != "5" ]]; then
+        # WebAPI 载荷同样修正枚举为 2 (POSIX)
+        if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
+            local hash_threads=$(nproc 2>/dev/null || echo 2)
+            json_payload="${json_payload},\"memory_working_set_limit\":$cache_val,\"disk_io_type\":2,\"disk_io_read_mode\":0,\"disk_io_write_mode\":0,\"hashing_threads\":$hash_threads"
+        else
             if [[ "$TUNE_MODE" == "1" ]]; then
                 json_payload="${json_payload},\"disk_cache\":$cache_val,\"disk_cache_ttl\":600"
             else
@@ -690,7 +694,6 @@ EOF
         
         if [[ "$http_code" == "200" ]]; then
             echo -e " ${GREEN}[√]${NC} 引擎防泄漏与底层网络已完全锁定为极速状态！"
-            # 必须重启才能使得刚刚初始化创建配置文件的 Disk IO 模块完美生效
             systemctl restart "qbittorrent-nox@$APP_USER"
         else
             echo -e " ${RED}[X]${NC} API 注入失败 (Code: $http_code)，请手动配置。"
@@ -734,6 +737,24 @@ install_apps() {
                 [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -o -P\"$VX_ZIP_PASS\""
                 execute_with_spinner "解压 ZIP 备份数据" sh -c "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$HB/vertex/data/\""
             fi
+            
+            # 【终极修复2】: 强行展平任何外壳嵌套，避免 Docker 挂载空壳导致生成新实例
+            local real_set=$(find "$HB/vertex/data" -name "setting.json" | head -n 1)
+            if [[ -n "$real_set" ]]; then
+                local real_dir=$(dirname "$real_set")
+                if [[ "$real_dir" != "$HB/vertex/data" ]]; then
+                    log_info "侦测到嵌套的备份结构，正在将数据展平挂载..."
+                    local tmp_vx_bk=$(mktemp -d)
+                    shopt -s dotglob
+                    mv "$real_dir"/* "$tmp_vx_bk/" 2>/dev/null || true
+                    rm -rf "$HB/vertex/data"/*
+                    mv "$tmp_vx_bk"/* "$HB/vertex/data/" 2>/dev/null || true
+                    shopt -u dotglob
+                    rm -rf "$tmp_vx_bk"
+                fi
+            else
+                log_warn "备份包解压后未找到 setting.json，这可能是一个损坏的备份文件！"
+            fi
             need_init=false
         elif [[ -f "$set_file" ]]; then
             log_info "检测到本地已有配置，执行原地接管..."
@@ -742,9 +763,8 @@ install_apps() {
 
         local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
 
-        # 【核心修复2】: 废弃原生 JQ，使用 Python 3 标准库无死角抹平 BOM 编码和换行符报错
         if [[ "$need_init" == "false" ]]; then
-            log_info "智能桥接备份数据与新网络架构 (启动 Python BOM 清洗层)..."
+            log_info "智能桥接备份数据与新网络架构 (启动 Python 强制清洗层)..."
             
             cat > "$TEMP_DIR/vx_fix.py" << EOF
 import json, os, codecs
