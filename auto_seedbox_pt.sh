@@ -56,7 +56,7 @@ ASP_ENV_FILE="/etc/asp_env.sh"
 TEMP_DIR=$(mktemp -d -t asp-XXXXXX)
 trap 'rm -rf "$TEMP_DIR"' EXIT
 
-# 个人专属固化直链库 (兜底与默认版本)
+# 固化直链库 (兜底与默认版本)
 URL_V4_AMD64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent/x86_64/qBittorrent-4.3.9-libtorrent-v1.2.20/qbittorrent-nox"
 URL_V4_ARM64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent/ARM64/qBittorrent-4.3.9-libtorrent-v1.2.20/qbittorrent-nox"
 URL_V5_AMD64="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/qBittorrent/x86_64/qBittorrent-5.0.4-libtorrent-v2.0.11/qbittorrent-nox"
@@ -104,12 +104,6 @@ download_file() {
     if ! execute_with_spinner "正在获取资源 $(basename "$output")" wget -q --retry-connrefused --tries=3 --timeout=30 -O "$output" "$url"; then
         log_err "下载失败，请检查网络或 URL: $url"
     fi
-}
-
-print_banner() {
-    echo ""
-    echo -e " ${CYAN}╔══════════════════ $1 ══════════════════╗${NC}"
-    echo ""
 }
 
 check_root() { 
@@ -361,7 +355,9 @@ uninstall() {
 # ================= 4. 智能系统优化 =================
 
 optimize_system() {
-    print_banner "系统内核优化 (ASP-Tuned)"
+    echo ""
+    echo -e " ${CYAN}╔══════════════════ 系统内核优化 (ASP-Tuned) ══════════════════╗${NC}"
+    echo ""
     echo -e "  ${CYAN}▶ 正在深度接管系统调度与网络协议栈...${NC}"
     
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
@@ -533,7 +529,9 @@ EOF
 # ================= 5. 应用部署逻辑 =================
 
 install_qbit() {
-    print_banner "部署 qBittorrent 引擎"
+    echo ""
+    echo -e " ${CYAN}╔══════════════════ 部署 qBittorrent 引擎 ══════════════════╗${NC}"
+    echo ""
     local arch=$(uname -m); local url=""
     local api="https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases"
     
@@ -595,11 +593,14 @@ install_qbit() {
     local cache_val="$QB_CACHE"
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
+    # 【新增中文配置】强制底层设定初始语言为中文 (zh)
     cat > "$config_file" << EOF
 [LegalNotice]
 Accepted=true
 
 [Preferences]
+General\Locale=zh
+WebUI\Locale=zh
 Downloads\SavePath=$HB/Downloads/
 WebUI\Password_PBKDF2="$pass_hash"
 WebUI\Port=$QB_WEB_PORT
@@ -666,7 +667,8 @@ EOF
         # 获取系统当前的默认配置
         curl -s -b "$TEMP_DIR/qb_cookie.txt" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/preferences" > "$TEMP_DIR/current_pref.json"
         
-        local patch_json="{\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"file_pool_size\":5000,\"peer_tos\":184"
+        # 【新增 API 中文锁】加入 "locale":"zh"
+        local patch_json="{\"locale\":\"zh\",\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"file_pool_size\":5000,\"peer_tos\":184"
         
         if [[ "$TUNE_MODE" == "1" ]]; then
             patch_json="${patch_json},\"max_connec\":-1,\"max_connec_per_torrent\":-1,\"max_uploads\":-1,\"max_uploads_per_torrent\":-1,\"max_half_open_connections\":500,\"send_buffer_watermark\":51200,\"send_buffer_low_watermark\":10240,\"send_buffer_tos_mark\":2,\"connection_speed\":1000,\"peer_timeout\":120,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":32,\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
@@ -718,7 +720,9 @@ EOF
 }
 
 install_apps() {
-    print_banner "部署容器化应用 (Docker)"
+    echo ""
+    echo -e " ${CYAN}╔══════════════════ 部署容器化应用 (Docker) ══════════════════╗${NC}"
+    echo ""
     wait_for_lock
     
     if ! command -v docker >/dev/null; then
@@ -726,7 +730,7 @@ install_apps() {
     fi
 
     if [[ "$DO_VX" == "true" ]]; then
-        echo -e " ${CYAN}▶ 正在处理 Vertex (智能轮询) 核心逻辑...${NC}"
+        echo -e "  ${CYAN}▶ 正在处理 Vertex (智能轮询) 核心逻辑...${NC}"
         
         docker rm -f vertex &>/dev/null || true
         
@@ -755,7 +759,7 @@ install_apps() {
             local real_set=$(find "$extract_tmp" -name "setting.json" | head -n 1)
             if [[ -n "$real_set" ]]; then
                 local real_dir=$(dirname "$real_set")
-                # 使用 cp -a 完美合并目录树，避免 mv 在目标同名目录存在时无法覆盖的问题
+                # 【重大修复】改用 cp -a 完美合并目录树，避免 mv 在目标同名目录存在时无法覆盖的问题
                 cp -a "$real_dir"/. "$HB/vertex/data/" 2>/dev/null || true
             else
                 log_warn "备份包解压后未找到 setting.json，这可能是一个损坏的备份文件！"
@@ -839,7 +843,7 @@ EOF
     fi
 
     if [[ "$DO_FB" == "true" ]]; then
-        echo -e " ${CYAN}▶ 正在处理 FileBrowser 核心逻辑...${NC}"
+        echo -e "  ${CYAN}▶ 正在处理 FileBrowser 核心逻辑...${NC}"
         rm -rf "$HB/.config/filebrowser" "$HB/fb.db"; mkdir -p "$HB/.config/filebrowser" && touch "$HB/fb.db" && chmod 666 "$HB/fb.db"
         chown -R "$APP_USER:$APP_USER" "$HB/.config/filebrowser" "$HB/fb.db"
 
@@ -889,10 +893,12 @@ echo -e "${CYAN}        ___   _____   ___  ${NC}"
 echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
-echo -e "${BLUE}========================================================${NC}"
-echo -e "${PURPLE}   ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.0 ✦${NC}"
-echo -e "${PURPLE}   ✦ 作者：Supcutie Github：yimouleng/Auto-Seedbox-PT ✦${NC}"
-echo -e "${BLUE}========================================================${NC}"
+echo -e "${BLUE}================================================================${NC}"
+echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.0 ✦${NC}"
+echo -e "${PURPLE}           ✦              作者：Supcutie             ✦${NC}"
+echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser, 极致优化 PT 环境${NC}"
+echo -e "${YELLOW}    💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
+echo -e "${BLUE}================================================================${NC}"
 echo ""
 
 echo -e " ${CYAN}╔══════════════════ 环境预检 ══════════════════╗${NC}"
@@ -992,6 +998,7 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
 fi
 
+# 【增强安全】以 600 权限写入环境变量文件，杜绝非 root 越权读取
 cat > "$ASP_ENV_FILE" << EOF
 QB_WEB_PORT=$QB_WEB_PORT
 QB_BT_PORT=$QB_BT_PORT
@@ -1055,3 +1062,4 @@ echo -e " ⚠️ ${YELLOW}强烈建议: 极速内核参数已注入，请执行 
 echo -e "========================================================================"
 fi
 echo ""
+```
