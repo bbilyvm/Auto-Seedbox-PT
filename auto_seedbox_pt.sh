@@ -213,7 +213,6 @@ setup_user() {
 # ================= 3. 深度卸载逻辑 =================
 
 uninstall() {
-    # 读取安装时保留的环境变量，确保清理的是自定义端口
     if [ -f "$ASP_ENV_FILE" ]; then
         source "$ASP_ENV_FILE"
     fi
@@ -537,7 +536,8 @@ install_qbit() {
     print_banner "部署 qBittorrent 引擎"
     local arch=$(uname -m); local url=""
     local api="https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases"
-    # 提取全局 Hash 线程计算变量，避免重复执行 nproc
+    
+    # 提取全局 Hash 线程计算变量，消除重复代码
     local hash_threads=$(nproc 2>/dev/null || echo 2)
     
     if [[ "$QB_VER_REQ" == "4" || "$QB_VER_REQ" == "4.3.9" ]]; then
@@ -688,19 +688,19 @@ EOF
 
         local final_payload="$patch_json"
         
-        # 【增强回退日志】动态合并现有配置与补丁
+        # 动态合并现有配置与补丁，并强化终端警告感知
         if command -v jq >/dev/null && grep -q "{" "$TEMP_DIR/current_pref.json"; then
             if jq -s '.[0] * .[1]' "$TEMP_DIR/current_pref.json" "$TEMP_DIR/patch_pref.json" > "$TEMP_DIR/final_pref.json" 2>/dev/null; then
                 if [[ -s "$TEMP_DIR/final_pref.json" && $(cat "$TEMP_DIR/final_pref.json") != "null" ]]; then
                     final_payload=$(cat "$TEMP_DIR/final_pref.json")
                 else
-                    log_warn "API 载荷合并后数据为空，已触发防呆回退机制 (直接下发补丁)。"
+                    echo -e "  ${YELLOW}[WARN] API 载荷合并后数据为空，已触发防呆回退机制 (直接下发补丁)。${NC}"
                 fi
             else
-                log_warn "jq 解析失败或版本跨度过大，已触发防呆回退机制 (直接下发补丁)。"
+                echo -e "  ${YELLOW}[WARN] jq 解析失败或版本跨度过大，已触发防呆回退机制 (直接下发补丁)。${NC}"
             fi
         else
-            log_warn "未检测到 jq 依赖或拉取初始配置失败，已触发防呆回退机制 (直接下发补丁)。"
+            echo -e "  ${YELLOW}[WARN] 未检测到 jq 依赖或拉取初始配置失败，已触发防呆回退机制 (直接下发补丁)。${NC}"
         fi
 
         local http_code=$(curl -s -o /dev/null -w "%{http_code}" -b "$TEMP_DIR/qb_cookie.txt" -X POST --data-urlencode "json=$final_payload" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/setPreferences")
@@ -755,7 +755,7 @@ install_apps() {
             local real_set=$(find "$extract_tmp" -name "setting.json" | head -n 1)
             if [[ -n "$real_set" ]]; then
                 local real_dir=$(dirname "$real_set")
-                # 【重大修复】改用 cp -a 完美合并解压后的目录树，防止旧逻辑 mv 遇到同名目录无法覆盖导致删种规则丢失
+                # 使用 cp -a 完美合并目录树，避免 mv 在目标同名目录存在时无法覆盖的问题
                 cp -a "$real_dir"/. "$HB/vertex/data/" 2>/dev/null || true
             else
                 log_warn "备份包解压后未找到 setting.json，这可能是一个损坏的备份文件！"
@@ -781,6 +781,11 @@ md5_pass = sys.argv[3]
 gw_ip = sys.argv[4]
 qb_port = sys.argv[5]
 app_pass = sys.argv[6]
+log_file = "/tmp/asp_vx_error.log"
+
+def log_err(msg):
+    with open(log_file, "a") as f:
+        f.write(msg + "\n")
 
 def update_json(path, modifier_func):
     if not os.path.exists(path) or not path.endswith('.json'): return
@@ -791,7 +796,7 @@ def update_json(path, modifier_func):
             with codecs.open(path, "w", "utf-8") as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
     except Exception as e:
-        pass # 静默忽略损坏的或非 UTF-8 编码的文件
+        log_err(f"Failed to process {path}: {str(e)}") # 异常静默流转至日志，不中断主流程
 
 def fix_setting(d):
     d["username"] = app_user
@@ -825,6 +830,7 @@ EOF
         fi
 
         chown -R "$APP_USER:$APP_USER" "$HB/vertex"
+        # Docker 容器可能需要特殊 UID 的写入权限，兼顾容错保留 777
         chmod -R 777 "$HB/vertex/data"
 
         execute_with_spinner "拉取 Vertex 镜像 (文件较大，视网络情况约需 1~3 分钟)" docker pull lswl/vertex:stable
@@ -986,7 +992,6 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
 fi
 
-# 【增强安全】以 600 权限写入环境变量文件，杜绝非 root 越权读取
 cat > "$ASP_ENV_FILE" << EOF
 QB_WEB_PORT=$QB_WEB_PORT
 QB_BT_PORT=$QB_BT_PORT
