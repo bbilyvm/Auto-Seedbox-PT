@@ -104,15 +104,10 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 本脚本自带极度硬核的卸载逻辑，支持系统状态无损回滚。
 
-**🧹 普通卸载（仅删服务，保留用户数据和内核优化）**
-```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) --uninstall
-```
-
-**🔥 彻底清除（删库跑路级别）**
+**🔥 彻底卸载（删库跑路级别）**
 ⚠️ **警告**：这将清除所有配置文件、容器映像，并**动态回滚** CPU 频率、TCP 缓冲区、拥塞窗口等内核参数至系统默认值！（默认保留 `Downloads` 下载目录防误删数据）
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) --purge
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) --uninstall
 ```
 
 ---
