@@ -10,6 +10,16 @@
 
 无论你是使用昂贵的万兆独立服务器抢首发，还是使用便宜的轻量 VPS 长期养老，或者想要保种刷流的，ASP 都能根据你的硬件环境**自动注入最完美的底层参数以及qBittorrent配置参数**，榨干服务器的每一滴性能。
 
+<p align="center">
+  <strong>
+    <a href="#-核心特性">功能特性</a> • 
+    <a href="#-快速开始">快速部署</a> • 
+    <a href="#-参数详解">参数配置</a> • 
+    <a href="#-架构深度解析为何在-5x-核心下强开-posix--direct-io">架构解析</a> • 
+    <a href="#-常见问题-faq">常见问题</a>
+  </strong>
+</p>
+
 ---
 
 ## ✨ 核心特性
@@ -29,17 +39,6 @@
 * **拥塞算法智能嗅探**：极限模式下，自动侦测并挂载系统内已有的 `BBRx` 或 `BBRv3` 等魔改算法；若无第三方内核则安全退回原生 BBR，绝不强行换内核导致机器变砖。
 * **一键无缝搬家**：支持直接填入 ZIP 备份直链，自动还原 Vertex 数据。内置强大的 Python 清洗引擎，无惧任何外壳嵌套或 BOM 乱码，**智能展平数据结构**并精准替换 qBit 网关 IP 与面板密码。
 * **踏雪无痕卸载**：`--uninstall` 模式不仅清理容器，更能将打药的 Sysctl 参数、脏页回写策略、网卡队列、甚至 CPU 调度策略动态回滚至系统初始状态。
-
----
-
-## 🚀 架构解析：为何在 5.x 核心下强开 POSIX + Direct I/O？
-
-绝大多数硬核玩家对 qBittorrent 5.x（基于 libtorrent v2）避之不及，其技术原罪在于：默认引入的 **MMap (内存映射文件)** 机制在面对万兆网络极高吞吐的随机区块写入时，会瞬间击穿 Linux 内核的 Page Cache 水位线，引发灾难性的 VFS Cache Thrashing（缓存抖动）。此时内核被迫挂起进程并频繁唤醒 `kswapd0` 进行同步阻塞级的 Dirty Page Writeback（脏页回写），最终导致严重的 I/O Wait 飙升、内核态 CPU 中断打满，表现为断崖式掉速与进程假死。
-
-**ASP 脚本的底层解法：**
-妥协退回 4.x 绝非最优解。ASP 脚本在实例首次初始化的关键期，会直接在文件系统层面对 `qBittorrent.conf` 进行硬编码劫持，强制注入 `DiskIOType=2` (POSIX 模式)，并对读写双端挂载等效于 `O_DIRECT` 的标志位（Disable OS cache）。
-
-这一操作直接剥夺了 Linux 调度器对 I/O 缓存的干预权，使海量数据流完全绕过 VFS 缓存层，实现网卡到 NVMe 总线的 Direct I/O 直通。再辅以脚本自动分配的 32 线程 `POSIX aio` 异步队列池与自适应 Hashing Threads，彻底打通万兆刷流的底层任督二脉，将单机吞吐推向物理硬件的绝对极限。
 
 ---
 
@@ -120,6 +119,17 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) --uninstall
 ```
+
+---
+
+## 🚀 架构解析：为何在 5.x 核心下强开 POSIX + Direct I/O？
+
+绝大多数硬核玩家对 qBittorrent 5.x（基于 libtorrent v2）避之不及，其技术原罪在于：默认引入的 **MMap (内存映射文件)** 机制在面对万兆网络极高吞吐的随机区块写入时，会瞬间击穿 Linux 内核的 Page Cache 水位线，引发灾难性的 VFS Cache Thrashing（缓存抖动）。此时内核被迫挂起进程并频繁唤醒 `kswapd0` 进行同步阻塞级的 Dirty Page Writeback（脏页回写），最终导致严重的 I/O Wait 飙升、内核态 CPU 中断打满，表现为断崖式掉速与进程假死。
+
+**ASP 脚本的底层解法：**
+妥协退回 4.x 绝非最优解。ASP 脚本在实例首次初始化的关键期，会直接在文件系统层面对 `qBittorrent.conf` 进行硬编码劫持，强制注入 `DiskIOType=2` (POSIX 模式)，并对读写双端挂载等效于 `O_DIRECT` 的标志位（Disable OS cache）。
+
+这一操作直接剥夺了 Linux 调度器对 I/O 缓存的干预权，使海量数据流完全绕过 VFS 缓存层，实现网卡到 NVMe 总线的 Direct I/O 直通。再辅以脚本自动分配的 32 线程 `POSIX aio` 异步队列池与自适应 Hashing Threads，彻底打通万兆刷流的底层任督二脉，将单机吞吐推向物理硬件的绝对极限。
 
 ---
 
