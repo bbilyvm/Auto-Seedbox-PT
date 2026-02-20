@@ -585,7 +585,7 @@ install_qbit() {
     local is_ssd=false
     if [ -f "/sys/block/$root_disk/queue/rotational" ] && [ "$(cat /sys/block/$root_disk/queue/rotational)" == "0" ]; then is_ssd=true; fi
     
-    # 动态缓存大小计算（如果用户没有指定 -c）
+    # 动态缓存大小计算
     if [[ "${CACHE_SET_BY_USER:-false}" == "false" ]]; then
         local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
         if [[ "$TUNE_MODE" == "1" ]]; then
@@ -598,7 +598,7 @@ install_qbit() {
     local cache_val="$QB_CACHE"
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
-    # 1. 基础引导配置
+    # 【核心修复1】: 强制将底层 IO 策略写入初始化配置文件，绕开 API 刷新失败的 Bug
     cat > "$config_file" << EOF
 [LegalNotice]
 Accepted=true
@@ -616,6 +616,17 @@ WebUI\CSRFProtection=false
 WebUI\HTTPS\Enabled=false
 Connection\PortRangeMin=$QB_BT_PORT
 EOF
+
+    if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
+        local hash_threads=$(nproc 2>/dev/null || echo 2)
+        cat >> "$config_file" << EOF
+Session\DiskIOType=1
+Session\DiskIOReadMode=0
+Session\DiskIOWriteMode=0
+Session\MemoryWorkingSetLimit=$cache_val
+Session\HashingThreads=$hash_threads
+EOF
+    fi
 
     chown "$APP_USER:$APP_USER" "$config_file"
     
@@ -639,7 +650,7 @@ EOF
     systemctl start "qbittorrent-nox@$APP_USER"
     open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
 
-    # 2. 轮询等待 WebUI 就绪 (带UI增强)
+    # 2. 轮询等待 WebUI 就绪
     local api_ready=false
     printf "\e[?25l"
     for i in {1..20}; do
@@ -652,32 +663,21 @@ EOF
     done
     printf "\e[?25h"
 
-    # 3. 强制 WebAPI 参数注入
+    # 3. WebAPI 参数注入 (仅处理不需要重启的普通参数)
     if [[ "$api_ready" == "true" ]]; then
         printf "\r\033[K ${GREEN}[√]${NC} API 引擎握手成功！开始下发高级底层配置... \n"
         
-        # 登录并获取 Cookie
         curl -s -c "$TEMP_DIR/qb_cookie.txt" --data "username=$APP_USER&password=$APP_PASS" "http://127.0.0.1:$QB_WEB_PORT/api/v2/auth/login" >/dev/null
         
-        # 组装基础 PT 必选规范载荷 (【修复】强制纯TCP对应值为1, 关DHT/PEX/LSD，开启向所有Tracker汇报)
         local json_payload="{\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1"
         
-        # 根据调优模式区分连接与 I/O 策略
         if [[ "$TUNE_MODE" == "1" ]]; then
-            # Mode 1: 极限刷流 (全开并发，降低半开连接防封，强制活跃任务数)
             json_payload="${json_payload},\"max_connec\":-1,\"max_connec_per_torrent\":-1,\"max_uploads\":-1,\"max_uploads_per_torrent\":-1,\"max_half_open_connections\":500,\"send_buffer_watermark\":51200,\"send_buffer_low_watermark\":10240,\"send_buffer_tos_mark\":2,\"connection_speed\":1000,\"peer_timeout\":120,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":32,\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
         else
-            # Mode 2: 均衡保种 (限制并发，降低半开连接，保护 HDD)
             json_payload="${json_payload},\"max_connec\":2000,\"max_connec_per_torrent\":100,\"max_uploads\":500,\"max_uploads_per_torrent\":20,\"max_half_open_connections\":50,\"send_buffer_watermark\":10240,\"send_buffer_low_watermark\":3072,\"send_buffer_tos_mark\":2,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":8"
         fi
         
-        # 根据版本区分内存缓存机制
-        if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
-            # v5 专属：设置工作集限制，并强行切换为 POSIX IO 绕开 mmap，开启 Direct IO (【修复】0代表Disable OS Cache)
-            local hash_threads=$(nproc 2>/dev/null || echo 2)
-            json_payload="${json_payload},\"memory_working_set_limit\":$cache_val,\"disk_io_type\":1,\"disk_io_read_mode\":0,\"disk_io_write_mode\":0,\"hashing_threads\":$hash_threads"
-        else
-            # v4 专属：传统的磁盘缓存控制 (Mode 2 延长过期时间)
+        if [[ "$INSTALLED_MAJOR_VER" != "5" ]]; then
             if [[ "$TUNE_MODE" == "1" ]]; then
                 json_payload="${json_payload},\"disk_cache\":$cache_val,\"disk_cache_ttl\":600"
             else
@@ -686,12 +686,11 @@ EOF
         fi
         json_payload="${json_payload}}"
 
-        # 发送设置请求
         local http_code=$(curl -s -o /dev/null -w "%{http_code}" -b "$TEMP_DIR/qb_cookie.txt" -X POST --data-urlencode "json=$json_payload" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/setPreferences")
         
         if [[ "$http_code" == "200" ]]; then
             echo -e " ${GREEN}[√]${NC} 引擎防泄漏与底层网络已完全锁定为极速状态！"
-            # 【修复】强制重启以应用 "需要重启" 的设置 (如磁盘IO类型)
+            # 必须重启才能使得刚刚初始化创建配置文件的 Disk IO 模块完美生效
             systemctl restart "qbittorrent-nox@$APP_USER"
         else
             echo -e " ${RED}[X]${NC} API 注入失败 (Code: $http_code)，请手动配置。"
@@ -715,7 +714,6 @@ install_apps() {
         
         docker rm -f vertex &>/dev/null || true
         
-        # 1. 预先构建 Vertex 核心目录树
         mkdir -p "$HB/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
         mkdir -p "$HB/vertex/data/douban/set" "$HB/vertex/data/watch/set"
         mkdir -p "$HB/vertex/data/rule/"{delete,link,rss,race,raceSet}
@@ -724,7 +722,6 @@ install_apps() {
         local set_file="$HB/vertex/data/setting.json"
         local need_init=true
 
-        # 2. 判断并处理数据恢复
         if [[ -n "$VX_RESTORE_URL" ]]; then
             local is_tar=false
             if [[ "$VX_RESTORE_URL" == *.tar.gz* || "$VX_RESTORE_URL" == *.tgz* ]]; then
@@ -743,35 +740,55 @@ install_apps() {
             need_init=false
         fi
 
-        # 3. 静态注入配置
-        if [[ "$need_init" == "false" ]]; then
-            log_info "智能桥接备份数据与新网络架构..."
-            if [[ -f "$set_file" ]]; then
-                # 【修复】去除可能存在的 BOM 头，防止 jq 解析失败导致密码没被覆盖
-                sed -i 's/^\xEF\xBB\xBF//' "$set_file" 2>/dev/null || true
-                if jq --arg u "$APP_USER" --arg p "$vx_pass_md5" \
-                   '.username = $u | .password = $p' "$set_file" > "${set_file}.tmp"; then
-                   mv "${set_file}.tmp" "$set_file"
-                else
-                   log_warn "Vertex setting.json 解析失败！登录账号密码将保持与您的原备份一致。"
-                fi
-            fi
+        local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
 
-            local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
-            shopt -s nullglob
-            local client_files=("$HB/vertex/data/client/"*.json)
-            if [ ${#client_files[@]} -gt 0 ]; then
-                for client in "${client_files[@]}"; do
-                    if grep -q "qBittorrent" "$client"; then
-                         jq --arg url "http://$gw:$QB_WEB_PORT" \
-                            --arg user "$APP_USER" \
-                            --arg pass "$APP_PASS" \
-                            '.clientUrl = $url | .username = $user | .password = $pass' \
-                            "$client" > "${client}.tmp" && mv "${client}.tmp" "$client" || true
-                    fi
-                done
-            fi
-            shopt -u nullglob
+        # 【核心修复2】: 废弃原生 JQ，使用 Python 3 标准库无死角抹平 BOM 编码和换行符报错
+        if [[ "$need_init" == "false" ]]; then
+            log_info "智能桥接备份数据与新网络架构 (启动 Python BOM 清洗层)..."
+            
+            cat > "$TEMP_DIR/vx_fix.py" << EOF
+import json, os, codecs
+
+vx_dir = "$HB/vertex/data"
+app_user = "$APP_USER"
+md5_pass = "$vx_pass_md5"
+gw_ip = "$gw"
+qb_port = "$QB_WEB_PORT"
+app_pass = "$APP_PASS"
+
+def update_json(path, modifier_func):
+    if not os.path.exists(path): return
+    try:
+        with codecs.open(path, "r", "utf-8-sig") as f:
+            data = json.load(f)
+        if modifier_func(data):
+            with codecs.open(path, "w", "utf-8") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        pass
+
+def fix_setting(d):
+    d["username"] = app_user
+    d["password"] = md5_pass
+    return True
+
+update_json(os.path.join(vx_dir, "setting.json"), fix_setting)
+
+client_dir = os.path.join(vx_dir, "client")
+if os.path.exists(client_dir):
+    for fname in os.listdir(client_dir):
+        if fname.endswith(".json"):
+            def fix_client(d):
+                c_type = d.get("client", "") or d.get("type", "")
+                if "qBittorrent" in c_type or "qbittorrent" in c_type.lower():
+                    d["clientUrl"] = f"http://{gw_ip}:{qb_port}"
+                    d["username"] = app_user
+                    d["password"] = app_pass
+                    return True
+                return False
+            update_json(os.path.join(client_dir, fname), fix_client)
+EOF
+            python3 "$TEMP_DIR/vx_fix.py"
         else
             cat > "$set_file" << EOF
 {
@@ -842,7 +859,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}========================================================${NC}"
-echo -e "${PURPLE}   ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v1.7.0 ✦${NC}"
+echo -e "${PURPLE}   ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v1.6.6 ✦${NC}"
 echo -e "${PURPLE}   ✦ 作者：Supcutie Github：yimouleng/Auto-Seedbox-PT ✦${NC}"
 echo -e "${BLUE}========================================================${NC}"
 echo ""
@@ -932,7 +949,6 @@ if [[ -z "$APP_PASS" ]]; then
     echo ""
 fi
 
-# 使用全新的加载器更新源
 export DEBIAN_FRONTEND=noninteractive
 execute_with_spinner "部署核心运行依赖 (curl, jq, tar...)" sh -c "apt-get -qq update && apt-get -qq install -y curl wget jq unzip tar python3 net-tools ethtool iptables"
 
