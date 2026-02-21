@@ -454,6 +454,7 @@ root soft nofile 1048576
 EOF
     fi
 
+    # 【修复内核日志脏写报错】加入队列调度器安全探测
     cat > /usr/local/bin/asp-tune.sh << EOF_SCRIPT
 #!/bin/bash
 IS_VIRT=\$(systemd-detect-virt 2>/dev/null || echo "none")
@@ -470,10 +471,15 @@ for disk in \$(lsblk -nd --output NAME | grep -v '^md' | grep -v '^loop'); do
         queue_path="/sys/block/\$disk/queue"
         if [ -f "\$queue_path/scheduler" ]; then
             rot=\$(cat "\$queue_path/rotational")
+            avail=\$(cat "\$queue_path/scheduler")
             if [ "\$rot" == "0" ]; then
-                echo "mq-deadline" > "\$queue_path/scheduler" 2>/dev/null || echo "none" > "\$queue_path/scheduler" 2>/dev/null
+                if echo "\$avail" | grep -qw "mq-deadline"; then echo "mq-deadline" > "\$queue_path/scheduler" 2>/dev/null; fi
             else
-                echo "bfq" > "\$queue_path/scheduler" 2>/dev/null || echo "mq-deadline" > "\$queue_path/scheduler" 2>/dev/null
+                if echo "\$avail" | grep -qw "bfq"; then
+                    echo "bfq" > "\$queue_path/scheduler" 2>/dev/null
+                elif echo "\$avail" | grep -qw "mq-deadline"; then
+                    echo "mq-deadline" > "\$queue_path/scheduler" 2>/dev/null
+                fi
             fi
         fi
     fi
@@ -535,7 +541,6 @@ install_qbit() {
     local arch=$(uname -m); local url=""
     local api="https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases"
     
-    # 提取全局 Hash 线程计算变量，消除重复代码
     local hash_threads=$(nproc 2>/dev/null || echo 2)
     
     if [[ "$QB_VER_REQ" == "4" || "$QB_VER_REQ" == "4.3.9" ]]; then
@@ -593,7 +598,7 @@ install_qbit() {
     local cache_val="$QB_CACHE"
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
-    # 【强制中文配置】初始化即锁定 zh_CN，彻底解决 Qt 版本语言回退 bug
+    # 【强制中文配置】初始化锁定 zh_CN，彻底解决语言回退 bug
     cat > "$config_file" << EOF
 [LegalNotice]
 Accepted=true
@@ -646,7 +651,6 @@ EOF
     systemctl start "qbittorrent-nox@$APP_USER"
     open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
 
-    # 轮询等待 WebUI 就绪
     local api_ready=false
     printf "\e[?25l"
     for i in {1..20}; do
@@ -664,7 +668,6 @@ EOF
         
         curl -s -c "$TEMP_DIR/qb_cookie.txt" --data "username=$APP_USER&password=$APP_PASS" "http://127.0.0.1:$QB_WEB_PORT/api/v2/auth/login" >/dev/null
         
-        # 获取系统当前的默认配置
         curl -s -b "$TEMP_DIR/qb_cookie.txt" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/preferences" > "$TEMP_DIR/current_pref.json"
         
         # 【二次强制锁区】注入 payload 包含 locale: zh_CN
@@ -690,7 +693,6 @@ EOF
 
         local final_payload="$patch_json"
         
-        # 动态合并现有配置与补丁，并强化终端警告感知
         if command -v jq >/dev/null && grep -q "{" "$TEMP_DIR/current_pref.json"; then
             if jq -s '.[0] * .[1]' "$TEMP_DIR/current_pref.json" "$TEMP_DIR/patch_pref.json" > "$TEMP_DIR/final_pref.json" 2>/dev/null; then
                 if [[ -s "$TEMP_DIR/final_pref.json" && $(cat "$TEMP_DIR/final_pref.json") != "null" ]]; then
@@ -770,7 +772,9 @@ install_apps() {
             need_init=false
         fi
 
-        local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
+        # 【安全修复】获取 Docker Gateway 并防空
+        local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
+        [[ -z "$gw" ]] && gw="172.17.0.1"
 
         if [[ "$need_init" == "false" ]]; then
             log_info "智能桥接备份数据与新网络架构 (启动 Python 强制清洗层)..."
@@ -996,11 +1000,12 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
 fi
 
+# 【强制带环境穿透】使用 export 写入环境变量，杜绝子 Shell 找不到配置
 cat > "$ASP_ENV_FILE" << EOF
-QB_WEB_PORT=$QB_WEB_PORT
-QB_BT_PORT=$QB_BT_PORT
-VX_PORT=${VX_PORT:-3000}
-FB_PORT=${FB_PORT:-8081}
+export QB_WEB_PORT=$QB_WEB_PORT
+export QB_BT_PORT=$QB_BT_PORT
+export VX_PORT=${VX_PORT:-3000}
+export FB_PORT=${FB_PORT:-8081}
 EOF
 chmod 600 "$ASP_ENV_FILE"
 
@@ -1021,7 +1026,10 @@ fi
 # ================= 极简极客版终端 Dashboard =================
 echo ""
 echo ""
-VX_GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || echo "172.17.0.1")
+
+# 【安全获取网关】
+VX_GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
+[[ -z "$VX_GW" ]] && VX_GW="172.17.0.1"
 
 cat << EOF
 ========================================================================
