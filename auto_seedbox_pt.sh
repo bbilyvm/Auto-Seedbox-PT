@@ -378,13 +378,30 @@ optimize_system() {
     local ui_cc="bbr"
 
     if [[ "$TUNE_MODE" == "1" ]]; then
-        rmem_max=1073741824 
-        tcp_wmem="4096 65536 1073741824"
-        tcp_rmem="4096 87380 1073741824"
+        # 【动态自适应计算】基于物理内存动态分配 TCP 最大缓冲区与系统队列
+        local mem_gb_sys=$((mem_kb / 1024 / 1024))
+        # 预留内存的 5% 作为极端情况下的套接字顶峰缓冲，并乘以 51 防整数溢出 (近似 1024 * 0.05)
+        local mem_5_percent=$((mem_kb * 51)) 
+        
+        # 最高封顶 1GB 缓冲区
+        if [[ $mem_5_percent -gt 1073741824 ]]; then
+            rmem_max=1073741824
+        else
+            rmem_max=$mem_5_percent
+        fi
+        
+        tcp_wmem="4096 65536 $rmem_max"
+        tcp_rmem="4096 87380 $rmem_max"
         dirty_bytes=268435456
         dirty_bg_bytes=67108864
-        backlog=250000
-        syn_backlog=819200
+        
+        if [[ $mem_gb_sys -ge 16 ]]; then
+            backlog=250000
+            syn_backlog=819200
+        else
+            backlog=100000
+            syn_backlog=204800
+        fi
         
         # BBRv3 / BBRx 穿透识别逻辑
         if echo "$avail_cc" | grep -qw "bbrx" || echo "$kernel_name" | grep -q "bbrx"; then
@@ -675,7 +692,51 @@ EOF
         local patch_json="{\"locale\":\"zh_CN\",\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"file_pool_size\":5000,\"peer_tos\":184"
         
         if [[ "$TUNE_MODE" == "1" ]]; then
-            patch_json="${patch_json},\"max_connec\":-1,\"max_connec_per_torrent\":-1,\"max_uploads\":-1,\"max_uploads_per_torrent\":-1,\"max_half_open_connections\":500,\"send_buffer_watermark\":51200,\"send_buffer_low_watermark\":10240,\"send_buffer_tos_mark\":2,\"connection_speed\":1000,\"peer_timeout\":120,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":32,\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
+            # 【动态自适应计算】基于硬件规模收敛极限模式并发参数
+            local mem_kb_qbit=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+            local mem_gb_qbit=$((mem_kb_qbit / 1024 / 1024))
+            
+            # 动态 I/O 线程: 核心数 x 4 (安全边界: 最少8，最多32)
+            local dyn_async_io=$((hash_threads * 4))
+            [[ $dyn_async_io -gt 32 ]] && dyn_async_io=32
+            [[ $dyn_async_io -lt 8 ]] && dyn_async_io=8
+            
+            # 默认赋予无限连接 (面向 32G+ 纯血独服)
+            local dyn_max_connec=-1
+            local dyn_max_connec_tor=-1
+            local dyn_max_up=-1
+            local dyn_max_up_tor=-1
+            local dyn_half_open=500
+            
+            # 针对 16G 级别机器 (实际可用内存约 15G+)
+            if [[ $mem_gb_qbit -lt 30 ]]; then
+                dyn_max_connec=8000
+                dyn_max_connec_tor=500
+                dyn_max_up=3000
+                dyn_max_up_tor=100
+                dyn_half_open=300
+            fi
+            
+            # 针对 8G 级别小钢炮 (实际可用内存约 7.5G+，如 Netcup G9.5)
+            # 【解除封印】将单种连接提升至 250，全局 4000，足以打满 2.5Gbps
+            if [[ $mem_gb_qbit -lt 14 ]]; then
+                dyn_max_connec=4000
+                dyn_max_connec_tor=250
+                dyn_max_up=1500
+                dyn_max_up_tor=60
+                dyn_half_open=150
+            fi
+            
+            # 针对 4G 及以下小鸡 (实际可用内存约 3.7G+)
+            if [[ $mem_gb_qbit -lt 6 ]]; then
+                dyn_max_connec=1500
+                dyn_max_connec_tor=100
+                dyn_max_up=500
+                dyn_max_up_tor=30
+                dyn_half_open=50
+            fi
+
+            patch_json="${patch_json},\"max_connec\":${dyn_max_connec},\"max_connec_per_torrent\":${dyn_max_connec_tor},\"max_uploads\":${dyn_max_up},\"max_uploads_per_torrent\":${dyn_max_up_tor},\"max_half_open_connections\":${dyn_half_open},\"send_buffer_watermark\":51200,\"send_buffer_low_watermark\":10240,\"send_buffer_tos_mark\":2,\"connection_speed\":1000,\"peer_timeout\":120,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":${dyn_async_io},\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
         else
             patch_json="${patch_json},\"max_connec\":2000,\"max_connec_per_torrent\":100,\"max_uploads\":500,\"max_uploads_per_torrent\":20,\"max_half_open_connections\":50,\"send_buffer_watermark\":10240,\"send_buffer_low_watermark\":3072,\"send_buffer_tos_mark\":2,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":8"
         fi
@@ -899,10 +960,10 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.0 ✦${NC}"
+echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.1.0 ✦${NC}"
 echo -e "${PURPLE}           ✦              作者：Supcutie             ✦${NC}"
-echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
-echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
+echo -e "${GREEN}             🚀 一键构建极致优化的 PT 刷流套件${NC}"
+echo -e "${YELLOW}           💡 GitHub: yimouleng/Auto-Seedbox-PT ${NC}"
 echo -e "${BLUE}================================================================${NC}"
 echo ""
 
@@ -959,7 +1020,7 @@ echo ""
 
 if [[ "$DO_TUNE" == "true" ]]; then
     if [[ "$TUNE_MODE" == "1" ]]; then
-        echo -e "  当前选定模式: ${RED}极限刷流 (Mode 1)${NC}"
+        echo -e "  当前选定模式: ${RED}极限刷流 (Mode 1 - 智能自适应)${NC}"
         echo -e "  推荐场景:     ${YELLOW}大内存/G口/万兆独服抢种${NC}"
         echo -e "  风险提示:     ${RED}会锁定CPU高频并暴增内核缓冲区，极大消耗内存！${NC}"
         echo ""
