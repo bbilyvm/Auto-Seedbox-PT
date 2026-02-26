@@ -1,139 +1,210 @@
 /**
- * Auto-Seedbox-PT (ASP) MediaInfo 增强扩展 v2.1
- * 修复了路径识别、单页应用注入及 PT 站 BBCode 适配
+ * Auto-Seedbox-PT (ASP) MediaInfo 极客前端扩展
+ * 由 Nginx 底层动态注入
  */
 (function() {
-    console.log("🚀 [ASP] MediaInfo 沉浸式 UI 已加载...");
-
+    console.log("🚀 [ASP] MediaInfo v1.1 已加载 (优化 PT 发种体验)！");
+    
+    // 兼容剪贴板复制逻辑
     const copyText = (text) => {
-        if (navigator.clipboard) return navigator.clipboard.writeText(text);
-        const input = document.createElement('textarea');
-        input.value = text; document.body.appendChild(input);
-        input.select(); document.execCommand('copy');
-        document.body.removeChild(input);
-        return Promise.resolve();
+        if (navigator.clipboard && window.isSecureContext) {
+            return navigator.clipboard.writeText(text);
+        } else {
+            let textArea = document.createElement("textarea");
+            textArea.value = text;
+            textArea.style.position = "fixed";
+            textArea.style.opacity = "0";
+            document.body.appendChild(textArea);
+            textArea.focus();
+            textArea.select();
+            return new Promise((res, rej) => {
+                document.execCommand('copy') ? res() : rej();
+                textArea.remove();
+            });
+        }
     };
 
-    // 修复：动态获取 FileBrowser 当前路径
+    // 动态引入弹窗 UI 库
+    const script = document.createElement('script');
+    script.src = "/sweetalert2.all.min.js";
+    document.head.appendChild(script);
+
     function getCurrentPath() {
-        const hashPath = window.location.hash.replace('#/files', '');
-        return decodeURIComponent(hashPath) || '/';
+        let path = window.location.pathname.replace(/^\/files/, '');
+        return decodeURIComponent(path) || '/';
     }
 
     let lastRightClickedFile = "";
 
-    // 核心：打开 MediaInfo 弹窗
+    // 捕获右键选中目标
+    document.addEventListener('contextmenu', function(e) {
+        let row = e.target.closest('.item');
+        if (row) {
+            let nameEl = row.querySelector('.name');
+            if (nameEl) lastRightClickedFile = nameEl.innerText.trim();
+        } else {
+            lastRightClickedFile = "";
+        }
+    }, true);
+
+    // 左键点击任意非按钮区域，清空右键记忆，防止幽灵状态
+    document.addEventListener('click', function(e) {
+        if (!e.target.closest('.asp-mi-btn-class') && !e.target.closest('.item[aria-selected="true"]')) {
+            lastRightClickedFile = "";
+        }
+    }, true);
+
     const openMediaInfo = (fileName) => {
         let fullPath = (getCurrentPath() + '/' + fileName).replace(/\/\//g, '/');
         if (typeof Swal === 'undefined') {
             alert('UI组件正在加载，请稍后再试...'); return;
         }
-        
         Swal.fire({
             title: '解析中...',
-            text: '正在提取底层媒体轨道信息',
+            text: '正在读取底层媒体轨道信息',
             allowOutsideClick: false,
-            background: '#1a1b1e',
-            color: '#e4e5e8',
             didOpen: () => Swal.showLoading()
         });
-
-        fetch(`/api/mi?file=${encodeURIComponent(fullPath)}`)
-            .then(r => r.json())
-            .then(data => {
-                if (data.error) throw new Error(data.error);
-                
-                let rawText = "";
-                let html = `<style>
-                    .mi-container { text-align: left; background: #141517; color: #c9d1d9; padding: 15px; border-radius: 8px; max-height: 50vh; overflow-y: auto; font-family: monospace; font-size: 12px; }
-                    .mi-track-header { color: #61afef; font-weight: bold; border-bottom: 1px solid #3e4451; margin: 10px 0 5px; padding-bottom: 3px; text-transform: uppercase; }
-                    .mi-item { display: flex; padding: 2px 0; border-bottom: 1px solid rgba(255,255,255,0.02); }
-                    .mi-key { width: 160px; color: #7f848e; flex-shrink: 0; }
-                    .mi-val { color: #e4e5e8; word-break: break-all; }
-                    .asp-btn-group { display: flex; gap: 10px; justify-content: center; margin-top: 15px; }
-                    .asp-btn { padding: 8px 16px; border-radius: 5px; cursor: pointer; border: none; font-weight: bold; transition: opacity 0.2s; }
-                    .btn-blue { background: #3498db; color: white; }
-                    .btn-green { background: #2ecc71; color: white; }
-                </style><div class="mi-container">`;
-
-                if (data.media && data.media.track) {
-                    data.media.track.forEach(t => {
-                        let type = t['@type'] || 'Unknown';
-                        rawText += `${type}\n`;
-                        html += `<div class="mi-track-header">${type}</div>`;
-                        for (let k in t) {
-                            if (k === '@type') continue;
-                            let val = t[k];
-                            rawText += `${String(k).padEnd(25, ' ')}: ${val}\n`;
-                            html += `<div class="mi-item"><div class="mi-key">${k}</div><div class="mi-val">${val}</div></div>`;
-                        }
-                        rawText += `\n`;
-                    });
-                }
-                html += `</div>`;
-
-                Swal.fire({
-                    title: `<span style="font-size: 16px; color: #fff;">${fileName}</span>`,
-                    html: html,
-                    width: '800px',
-                    background: '#1a1b1e',
-                    showConfirmButton: true,
-                    showDenyButton: true,
-                    confirmButtonText: '复制纯文本',
-                    denyButtonText: '复制 BBCode (PT用)',
-                    customClass: {
-                        confirmButton: 'asp-btn btn-blue',
-                        denyButton: 'asp-btn btn-green'
-                    }
-                }).then((result) => {
-                    let text = rawText.trim();
-                    if (result.isDenied) text = `[quote]\n${text}\n[/quote]`;
-                    if (result.isConfirmed || result.isDenied) {
-                        copyText(text).then(() => {
-                            Swal.fire({ toast: true, position: 'top-end', icon: 'success', title: '已复制到剪贴板', showConfirmButton: false, timer: 2000 });
-                        });
-                    }
-                });
-            })
-            .catch(e => Swal.fire({ icon: 'error', title: '解析失败', text: e.message, background: '#1a1b1e', color: '#fff' }));
-    };
-
-    // 核心：动态注入按钮逻辑 (针对 FileBrowser 优化)
-    const injectButton = () => {
-        // 查找 FileBrowser 的右键菜单容器
-        const menu = document.querySelector('#context-menu, .action-menu, .shell-menu');
-        if (!menu || menu.querySelector('.asp-mi-btn')) return;
-
-        const miBtn = document.createElement('button');
-        miBtn.className = 'action asp-mi-btn';
-        miBtn.setAttribute('aria-label', 'MediaInfo');
-        miBtn.innerHTML = '<i class="material-icons">info</i><span>MediaInfo</span>';
         
-        miBtn.onclick = () => {
-            if (lastRightClickedFile) openMediaInfo(lastRightClickedFile);
-            menu.style.display = 'none'; // 点击后隐藏菜单
-        };
+        fetch(`/api/mi?file=${encodeURIComponent(fullPath)}`)
+        .then(r => r.json())
+        .then(data => {
+            if(data.error) throw new Error(data.error);
+            
+            let rawText = "";
+            let html = `<style>
+                .mi-box { text-align:left; font-size:13px; background:#1e1e1e; color:#d4d4d4; padding:15px; border-radius:8px; max-height:550px; overflow-y:auto; font-family: 'Consolas', 'Courier New', monospace; user-select:text;}
+                .mi-track { margin-bottom: 20px; }
+                .mi-track-header { font-size: 15px; font-weight: bold; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #444; }
+                .mi-Video .mi-track-header { color: #569cd6; border-bottom-color: #569cd6; }
+                .mi-Audio .mi-track-header { color: #4ec9b0; border-bottom-color: #4ec9b0; }
+                .mi-Text .mi-track-header { color: #ce9178; border-bottom-color: #ce9178; }
+                .mi-General .mi-track-header { color: #dcdcaa; border-bottom-color: #dcdcaa; }
+                .mi-Menu .mi-track-header { color: #c586c0; border-bottom-color: #c586c0; }
+                .mi-item { display: flex; padding: 3px 0; line-height: 1.5; border-bottom: 1px dashed #333;}
+                .mi-key { width: 180px; flex-shrink: 0; color: #9cdcfe; }
+                .mi-val { flex-grow: 1; color: #cecece; word-wrap: break-word; }
+            </style><div class="mi-box">`;
 
-        // 插入到菜单的首位或特定位置
-        menu.prepend(miBtn);
+            if (data.media && data.media.track) {
+                data.media.track.forEach(t => {
+                    let type = t['@type'] || 'Unknown';
+                    // 头部空行，更符合原生 CLI 观感
+                    rawText += `${type}\n`;
+                    html += `<div class="mi-track mi-${type}"><div class="mi-track-header">${type}</div>`;
+
+                    for (let k in t) { 
+                        if (k === '@type') continue;
+                        let val = t[k];
+                        if (typeof val === 'object') val = JSON.stringify(val);
+                        
+                        // 优化对齐逻辑：原生格式通常是 Key 占一定宽度，然后跟 ' : '
+                        let paddedKey = String(k).padEnd(32, ' ');
+                        rawText += `${paddedKey}: ${val}\n`;
+
+                        html += `<div class="mi-item"><div class="mi-key">${k}</div><div class="mi-val">${val}</div></div>`;
+                    }
+                    rawText += `\n`;
+                    html += `</div>`;
+                });
+            } else { 
+                rawText = JSON.stringify(data, null, 2); 
+                html += `<pre>${rawText}</pre>`;
+            }
+            html += `</div>`;
+            
+            // 优化：提供纯文本与 BBCode 两种复制选项
+            Swal.fire({ 
+                title: fileName, 
+                html: html, 
+                width: '850px',
+                showCancelButton: true,
+                showDenyButton: true, // 开启第三个按钮
+                confirmButtonColor: '#3085d6',
+                denyButtonColor: '#28a745', // 绿色
+                cancelButtonColor: '#555',
+                confirmButtonText: '📋 纯文本',
+                denyButtonText: '🏷️ 复制 BBCode',
+                cancelButtonText: '关闭'
+            }).then((result) => {
+                let textToCopy = rawText.trim();
+                let successMsg = '纯文本复制成功！';
+
+                if (result.isConfirmed) {
+                    // 纯文本
+                    textToCopy = rawText.trim();
+                } else if (result.isDenied) {
+                    // BBCode 格式
+                    textToCopy = `[quote]\n${rawText.trim()}\n[/quote]`;
+                    successMsg = 'BBCode 复制成功，快去发种吧！';
+                } else {
+                    return; // 点击关闭或背景
+                }
+
+                copyText(textToCopy).then(() => {
+                    Swal.fire({toast: true, position: 'top-end', icon: 'success', title: successMsg, showConfirmButton: false, timer: 2000});
+                }).catch(() => {
+                    Swal.fire('复制失败', '请手动选中上方文本进行复制', 'error');
+                });
+            });
+        }).catch(e => Swal.fire('解析失败', e.toString(), 'error'));
     };
 
-    // 监听文件列表的右键点击
-    document.addEventListener('contextmenu', (e) => {
-        const item = e.target.closest('.item, tr');
-        if (item) {
-            // 获取文件名（针对 FileBrowser 不同视图的兼容处理）
-            lastRightClickedFile = item.getAttribute('aria-label') || 
-                                   item.querySelector('.name')?.innerText || 
-                                   item.querySelector('td:nth-child(2)')?.innerText;
-        }
-    }, true);
-
-    // 使用 MutationObserver 监听 DOM 变化，实现单页应用下的动态注入
+    // 性能优化：加入防抖 (Debounce) 机制
+    let observerTimer = null;
     const observer = new MutationObserver(() => {
-        injectButton();
+        if (observerTimer) clearTimeout(observerTimer);
+        
+        observerTimer = setTimeout(() => {
+            let targetFile = "";
+            if (lastRightClickedFile) {
+                targetFile = lastRightClickedFile;
+            } else {
+                let selectedRows = document.querySelectorAll('.item[aria-selected="true"], .item.selected');
+                if (selectedRows.length === 1) {
+                    let nameEl = selectedRows[0].querySelector('.name');
+                    if (nameEl) targetFile = nameEl.innerText.trim();
+                }
+            }
+
+            // 扩展支持：添加原盘 index.bdmv 及无损音频格式
+            let isMedia = targetFile && targetFile.match(/\.(mp4|mkv|avi|ts|iso|rmvb|wmv|flv|mov|webm|vob|m2ts|bdmv|flac|wav|ape|alac)$/i);
+
+            let menus = new Set();
+            document.querySelectorAll('button[aria-label="Info"]').forEach(btn => {
+                if (btn.parentElement) menus.add(btn.parentElement);
+            });
+
+            menus.forEach(menu => {
+                let existingBtn = menu.querySelector('.asp-mi-btn-class');
+                if (isMedia) {
+                    if (!existingBtn) {
+                        let btn = document.createElement('button');
+                        btn.className = 'action asp-mi-btn-class';
+                        btn.setAttribute('title', 'MediaInfo');
+                        btn.setAttribute('aria-label', 'MediaInfo');
+                        btn.innerHTML = '<i class="material-icons">movie</i><span>MediaInfo</span>';
+                        
+                        btn.onclick = function(ev) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            document.body.click(); 
+                            openMediaInfo(targetFile);
+                        };
+                        
+                        let infoBtn = menu.querySelector('button[aria-label="Info"]');
+                        if (infoBtn) {
+                            infoBtn.insertAdjacentElement('afterend', btn);
+                        } else {
+                            menu.appendChild(btn);
+                        }
+                    }
+                } else {
+                    if (existingBtn) existingBtn.remove();
+                }
+            });
+        }, 100); // 100ms 延迟，极大降低浏览器性能开销
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
-
 })();
