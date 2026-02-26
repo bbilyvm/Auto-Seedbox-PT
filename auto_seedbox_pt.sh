@@ -1050,8 +1050,8 @@ EOF_NGINX
 
         execute_with_spinner "拉取 FileBrowser 镜像" docker pull filebrowser/filebrowser:latest
 
-        docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config init || true
-        docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin || true
+        execute_with_spinner "初始化 FileBrowser 数据库" sh -c "docker run --rm --user 0:0 -v \"$HB/fb.db\":/database/filebrowser.db filebrowser/filebrowser:latest config init >/dev/null 2>&1 || true"
+        execute_with_spinner "创建 FileBrowser 管理员" sh -c "docker run --rm --user 0:0 -v \"$HB/fb.db\":/database/filebrowser.db filebrowser/filebrowser:latest users add \"$APP_USER\" \"$APP_PASS\" --perm.admin >/dev/null 2>&1 || true"
         
         execute_with_spinner "启动 FileBrowser 容器" docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/fb.db":/database/filebrowser.db -v "$HB/.config/filebrowser":/config -p 127.0.0.1:18081:80 filebrowser/filebrowser:latest
         
