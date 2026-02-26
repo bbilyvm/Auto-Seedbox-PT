@@ -1050,11 +1050,15 @@ EOF_NGINX
 
         execute_with_spinner "拉取 FileBrowser 镜像" docker pull filebrowser/filebrowser:latest
 
-        execute_with_spinner "初始化 FileBrowser 数据库" sh -c "docker run --rm --user 0:0 -v \"$HB/fb.db\":/database/filebrowser.db filebrowser/filebrowser:latest config init >/dev/null 2>&1 || true"
-        execute_with_spinner "创建 FileBrowser 管理员" sh -c "docker run --rm --user 0:0 -v \"$HB/fb.db\":/database/filebrowser.db filebrowser/filebrowser:latest users add \"$APP_USER\" \"$APP_PASS\" --perm.admin >/dev/null 2>&1 || true"
+        # 1. 直接启动守护容器，FileBrowser 遇到空数据库会自动完成 config init 建表
+        execute_with_spinner "启动 FileBrowser 容器引擎" docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/fb.db":/database/filebrowser.db -v "$HB/.config/filebrowser":/config -p 127.0.0.1:18081:80 filebrowser/filebrowser:latest
         
-        execute_with_spinner "启动 FileBrowser 容器" docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/fb.db":/database/filebrowser.db -v "$HB/.config/filebrowser":/config -p 127.0.0.1:18081:80 filebrowser/filebrowser:latest
+        # 2. 给予容器内部 SQLite 初始化建表的缓冲时间 (关键)
+        sleep 3
         
+        # 3. 使用 docker exec 在运行中的容器内直接注入用户。
+        # 注意：这里去掉了 >/dev/null 2>&1 || true，如果报错，真正的错误信息会被记录到 /tmp/asp_install.log 中
+        execute_with_spinner "创建 FileBrowser 管理员" sh -c "docker exec filebrowser filebrowser users add \"$APP_USER\" \"$APP_PASS\" --perm.admin"        
         open_port "$FB_PORT"
     fi
 }
