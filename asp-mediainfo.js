@@ -3,7 +3,7 @@
  * 由 Nginx 底层动态注入
  */
 (function() {
-    console.log("[ASP] MediaInfo v1.0 已加载！");
+    console.log("🚀 [ASP] MediaInfo v1.1 已加载 (优化 PT 发种体验)！");
     
     // 兼容剪贴板复制逻辑
     const copyText = (text) => {
@@ -47,9 +47,9 @@
         }
     }, true);
 
-    // 左键空白处清理记忆
+    // 左键点击任意非按钮区域，清空右键记忆，防止幽灵状态
     document.addEventListener('click', function(e) {
-        if (!e.target.closest('.asp-mi-btn-class')) {
+        if (!e.target.closest('.asp-mi-btn-class') && !e.target.closest('.item[aria-selected="true"]')) {
             lastRightClickedFile = "";
         }
     }, true);
@@ -66,7 +66,6 @@
             didOpen: () => Swal.showLoading()
         });
         
-        // 使用相对路径，Nginx 会自动代理到正确的端口
         fetch(`/api/mi?file=${encodeURIComponent(fullPath)}`)
         .then(r => r.json())
         .then(data => {
@@ -77,11 +76,11 @@
                 .mi-box { text-align:left; font-size:13px; background:#1e1e1e; color:#d4d4d4; padding:15px; border-radius:8px; max-height:550px; overflow-y:auto; font-family: 'Consolas', 'Courier New', monospace; user-select:text;}
                 .mi-track { margin-bottom: 20px; }
                 .mi-track-header { font-size: 15px; font-weight: bold; margin-bottom: 8px; padding-bottom: 4px; border-bottom: 1px solid #444; }
-                .mi-Video .mi-track-header { color: #569cd6; border-bottom-color: #569cd6; } /* 蓝色 */
-                .mi-Audio .mi-track-header { color: #4ec9b0; border-bottom-color: #4ec9b0; } /* 青色 */
-                .mi-Text .mi-track-header { color: #ce9178; border-bottom-color: #ce9178; } /* 橙色 */
-                .mi-General .mi-track-header { color: #dcdcaa; border-bottom-color: #dcdcaa; } /* 黄色 */
-                .mi-Menu .mi-track-header { color: #c586c0; border-bottom-color: #c586c0; } /* 紫色 */
+                .mi-Video .mi-track-header { color: #569cd6; border-bottom-color: #569cd6; }
+                .mi-Audio .mi-track-header { color: #4ec9b0; border-bottom-color: #4ec9b0; }
+                .mi-Text .mi-track-header { color: #ce9178; border-bottom-color: #ce9178; }
+                .mi-General .mi-track-header { color: #dcdcaa; border-bottom-color: #dcdcaa; }
+                .mi-Menu .mi-track-header { color: #c586c0; border-bottom-color: #c586c0; }
                 .mi-item { display: flex; padding: 3px 0; line-height: 1.5; border-bottom: 1px dashed #333;}
                 .mi-key { width: 180px; flex-shrink: 0; color: #9cdcfe; }
                 .mi-val { flex-grow: 1; color: #cecece; word-wrap: break-word; }
@@ -90,9 +89,8 @@
             if (data.media && data.media.track) {
                 data.media.track.forEach(t => {
                     let type = t['@type'] || 'Unknown';
-                    // 复制用的纯文本排版
+                    // 头部空行，更符合原生 CLI 观感
                     rawText += `${type}\n`;
-                    // HTML 渲染排版
                     html += `<div class="mi-track mi-${type}"><div class="mi-track-header">${type}</div>`;
 
                     for (let k in t) { 
@@ -100,11 +98,10 @@
                         let val = t[k];
                         if (typeof val === 'object') val = JSON.stringify(val);
                         
-                        // 文本格式化：补齐空格，模仿标准 CLI 界面
+                        // 优化对齐逻辑：原生格式通常是 Key 占一定宽度，然后跟 ' : '
                         let paddedKey = String(k).padEnd(32, ' ');
                         rawText += `${paddedKey}: ${val}\n`;
 
-                        // HTML 格式化
                         html += `<div class="mi-item"><div class="mi-key">${k}</div><div class="mi-val">${val}</div></div>`;
                     }
                     rawText += `\n`;
@@ -116,76 +113,97 @@
             }
             html += `</div>`;
             
+            // 优化：提供纯文本与 BBCode 两种复制选项
             Swal.fire({ 
                 title: fileName, 
                 html: html, 
                 width: '850px',
                 showCancelButton: true,
+                showDenyButton: true, // 开启第三个按钮
                 confirmButtonColor: '#3085d6',
+                denyButtonColor: '#28a745', // 绿色
                 cancelButtonColor: '#555',
-                confirmButtonText: '📋 复制排版信息',
+                confirmButtonText: '📋 纯文本',
+                denyButtonText: '🏷️ 复制 BBCode (发种)',
                 cancelButtonText: '关闭'
             }).then((result) => {
+                let textToCopy = rawText.trim();
+                let successMsg = '纯文本复制成功！';
+
                 if (result.isConfirmed) {
-                    copyText(rawText.trim()).then(() => {
-                        Swal.fire({toast: true, position: 'top-end', icon: 'success', title: '复制成功！', showConfirmButton: false, timer: 2000});
-                    }).catch(() => {
-                        Swal.fire('复制失败', '请手动选中上方文本进行复制', 'error');
-                    });
+                    // 纯文本
+                    textToCopy = rawText.trim();
+                } else if (result.isDenied) {
+                    // BBCode 格式
+                    textToCopy = `[quote]\n${rawText.trim()}\n[/quote]`;
+                    successMsg = 'BBCode 复制成功，快去发种吧！';
+                } else {
+                    return; // 点击关闭或背景
                 }
+
+                copyText(textToCopy).then(() => {
+                    Swal.fire({toast: true, position: 'top-end', icon: 'success', title: successMsg, showConfirmButton: false, timer: 2000});
+                }).catch(() => {
+                    Swal.fire('复制失败', '请手动选中上方文本进行复制', 'error');
+                });
             });
         }).catch(e => Swal.fire('解析失败', e.toString(), 'error'));
     };
 
+    // 性能优化：加入防抖 (Debounce) 机制
+    let observerTimer = null;
     const observer = new MutationObserver(() => {
-        let targetFile = "";
-        if (lastRightClickedFile) {
-            targetFile = lastRightClickedFile;
-        } else {
-            let selectedRows = document.querySelectorAll('.item[aria-selected="true"], .item.selected');
-            if (selectedRows.length === 1) {
-                let nameEl = selectedRows[0].querySelector('.name');
-                if (nameEl) targetFile = nameEl.innerText.trim();
-            }
-        }
-
-        // 扩充支持的媒体格式
-        let isVideo = targetFile && targetFile.match(/\.(mp4|mkv|avi|ts|iso|rmvb|wmv|flv|mov|webm|vob|m2ts)$/i);
-
-        let menus = new Set();
-        document.querySelectorAll('button[aria-label="Info"]').forEach(btn => {
-            if (btn.parentElement) menus.add(btn.parentElement);
-        });
-
-        menus.forEach(menu => {
-            let existingBtn = menu.querySelector('.asp-mi-btn-class');
-            if (isVideo) {
-                if (!existingBtn) {
-                    let btn = document.createElement('button');
-                    btn.className = 'action asp-mi-btn-class';
-                    btn.setAttribute('title', 'MediaInfo');
-                    btn.setAttribute('aria-label', 'MediaInfo');
-                    // ★ 更换为电影胶片图标
-                    btn.innerHTML = '<i class="material-icons">movie</i><span>MediaInfo</span>';
-                    
-                    btn.onclick = function(ev) {
-                        ev.preventDefault();
-                        ev.stopPropagation();
-                        document.body.click(); 
-                        openMediaInfo(targetFile);
-                    };
-                    
-                    let infoBtn = menu.querySelector('button[aria-label="Info"]');
-                    if (infoBtn) {
-                        infoBtn.insertAdjacentElement('afterend', btn);
-                    } else {
-                        menu.appendChild(btn);
-                    }
-                }
+        if (observerTimer) clearTimeout(observerTimer);
+        
+        observerTimer = setTimeout(() => {
+            let targetFile = "";
+            if (lastRightClickedFile) {
+                targetFile = lastRightClickedFile;
             } else {
-                if (existingBtn) existingBtn.remove();
+                let selectedRows = document.querySelectorAll('.item[aria-selected="true"], .item.selected');
+                if (selectedRows.length === 1) {
+                    let nameEl = selectedRows[0].querySelector('.name');
+                    if (nameEl) targetFile = nameEl.innerText.trim();
+                }
             }
-        });
+
+            // 扩展支持：添加原盘 index.bdmv 及无损音频格式
+            let isMedia = targetFile && targetFile.match(/\.(mp4|mkv|avi|ts|iso|rmvb|wmv|flv|mov|webm|vob|m2ts|bdmv|flac|wav|ape|alac)$/i);
+
+            let menus = new Set();
+            document.querySelectorAll('button[aria-label="Info"]').forEach(btn => {
+                if (btn.parentElement) menus.add(btn.parentElement);
+            });
+
+            menus.forEach(menu => {
+                let existingBtn = menu.querySelector('.asp-mi-btn-class');
+                if (isMedia) {
+                    if (!existingBtn) {
+                        let btn = document.createElement('button');
+                        btn.className = 'action asp-mi-btn-class';
+                        btn.setAttribute('title', 'MediaInfo');
+                        btn.setAttribute('aria-label', 'MediaInfo');
+                        btn.innerHTML = '<i class="material-icons">movie</i><span>MediaInfo</span>';
+                        
+                        btn.onclick = function(ev) {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            document.body.click(); 
+                            openMediaInfo(targetFile);
+                        };
+                        
+                        let infoBtn = menu.querySelector('button[aria-label="Info"]');
+                        if (infoBtn) {
+                            infoBtn.insertAdjacentElement('afterend', btn);
+                        } else {
+                            menu.appendChild(btn);
+                        }
+                    }
+                } else {
+                    if (existingBtn) existingBtn.remove();
+                }
+            });
+        }, 100); // 100ms 延迟，极大降低浏览器性能开销
     });
 
     observer.observe(document.body, { childList: true, subtree: true });
