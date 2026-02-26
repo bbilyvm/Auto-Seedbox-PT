@@ -10,7 +10,7 @@
 #   -c : qBittorrent 缓存大小 (MiB, 仅4.x有效, 5.x使用mmap)
 #   -q : qBittorrent 版本 (4, 4.3.9, 5, 5.0.4, latest, 或精确小版本如 5.1.2)
 #   -v : 安装 Vertex
-#   -f : 安装 FileBrowser (含 MediaInfo 极客版扩展)
+#   -f : 安装 FileBrowser (含 MediaInfo 扩展)
 #   -t : 启用系统内核优化（强烈推荐）
 #   -m : 调优模式 (1: 极限刷流 / 2: 均衡保种) [默认 1]
 #   -o : 自定义端口 (会提示输入)
@@ -335,7 +335,7 @@ uninstall() {
 
     log_warn "清理配置文件..."
     if [[ -d "$target_home" ]]; then
-         rm -rf "$target_home/.config/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser"
+         rm -rf "$target_home/.config/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser" "$target_home/filebrowser_data"
          log_info "已清理 $target_home 下的配置文件。"
          
          if [[ -d "$target_home/Downloads" ]]; then
@@ -352,7 +352,7 @@ uninstall() {
              echo -e "${YELLOW}=================================================${NC}"
          fi
     fi
-    rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "$ASP_ENV_FILE"
+    rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/filebrowser_data" "$ASP_ENV_FILE"
     log_warn "建议重启服务器 (reboot) 以彻底清理内核内存驻留。"
     
     log_info "卸载完成。"
@@ -916,11 +916,14 @@ EOF
     fi
 
     if [[ "$DO_FB" == "true" ]]; then
-        echo -e "  ${CYAN}▶ 正在处理 FileBrowser 核心逻辑 (引入 Nginx 极客注入与 MediaInfo)...${NC}"
+        echo -e "  ${CYAN}▶ 正在处理 FileBrowser 核心逻辑 (引入 Nginx 注入与 MediaInfo)...${NC}"
         
         docker rm -f filebrowser &>/dev/null || true
-        rm -rf "$HB/.config/filebrowser" "$HB/fb.db"
-        mkdir -p "$HB/.config/filebrowser" && touch "$HB/fb.db" && chmod 666 "$HB/fb.db"
+        
+        # 彻底移除旧版单文件挂载遗留，建立全新的专属目录
+        rm -rf "$HB/.config/filebrowser" "$HB/fb.db" "$HB/filebrowser_data"
+        mkdir -p "$HB/.config/filebrowser" "$HB/filebrowser_data"
+        chown -R "$APP_USER:$APP_USER" "$HB/.config/filebrowser" "$HB/filebrowser_data"
 
         if ! command -v nginx >/dev/null; then
             execute_with_spinner "安装 Nginx 底层代理引擎" sh -c "apt-get update -qq && apt-get install -y nginx"
@@ -928,7 +931,7 @@ EOF
 
         # 引入你存放于 GitHub 的完美重构版 JS 代码
         JS_REMOTE_URL="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/asp-mediainfo.js"
-        execute_with_spinner "拉取 MediaInfo 极客前端扩展" wget -qO /usr/local/bin/asp-mediainfo.js "$JS_REMOTE_URL"
+        execute_with_spinner "拉取 MediaInfo 前端扩展" wget -qO /usr/local/bin/asp-mediainfo.js "$JS_REMOTE_URL"
         execute_with_spinner "拉取弹窗 UI 依赖库" wget -qO /usr/local/bin/sweetalert2.all.min.js "https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"
 
         # 带有智能降级 JSON 重组引擎的 Python 微服务
@@ -1047,18 +1050,15 @@ server {
 EOF_NGINX
         systemctl restart nginx
 
-        chown -R "$APP_USER:$APP_USER" "$HB/.config/filebrowser" "$HB/fb.db"
-
         execute_with_spinner "拉取 FileBrowser 镜像" docker pull filebrowser/filebrowser:latest
 
-        # 1. 直接启动守护容器，FileBrowser 遇到空数据库会自动完成 config init 建表
-        execute_with_spinner "启动 FileBrowser 容器引擎" docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/fb.db":/database/filebrowser.db -v "$HB/.config/filebrowser":/config -p 127.0.0.1:18081:80 filebrowser/filebrowser:latest
+        # 【终极防弹机制】：挂载目录而非单文件，且在主程序启动前完成所有的数据库初始化和账号注入！
+        execute_with_spinner "初始化 FileBrowser 数据库表" sh -c "docker run --rm --user 0:0 -v \"$HB/filebrowser_data\":/database filebrowser/filebrowser:latest config init >/dev/null 2>&1 || true"
         
-        # 2. 给予容器内部 SQLite 初始化建表的缓冲时间 (关键)
-        sleep 3
+        execute_with_spinner "注入 FileBrowser 管理员账户" sh -c "docker run --rm --user 0:0 -v \"$HB/filebrowser_data\":/database filebrowser/filebrowser:latest users add \"$APP_USER\" \"$APP_PASS\" --perm.admin >/dev/null 2>&1 || true"
         
-        # 3. 引入智能重试机制：等待内部 SQLite 建表完成，最高尝试 5 次。
-        execute_with_spinner "创建 FileBrowser 管理员" sh -c "for i in {1..5}; do docker exec filebrowser filebrowser users add \"$APP_USER\" \"$APP_PASS\" --perm.admin >/dev/null 2>&1 && break; sleep 2; done || true"        
+        execute_with_spinner "启动 FileBrowser 容器引擎" docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/filebrowser_data":/database -v "$HB/.config/filebrowser":/config -p 127.0.0.1:18081:80 filebrowser/filebrowser:latest
+        
         open_port "$FB_PORT"
     fi
 }
