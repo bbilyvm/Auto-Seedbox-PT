@@ -10,7 +10,7 @@
 #   -c : qBittorrent 缓存大小 (MiB, 仅4.x有效, 5.x使用mmap)
 #   -q : qBittorrent 版本 (4, 4.3.9, 5, 5.0.4, latest, 或精确小版本如 5.1.2)
 #   -v : 安装 Vertex
-#   -f : 安装 FileBrowser
+#   -f : 安装 FileBrowser (含 MediaInfo 极客版扩展)
 #   -t : 启用系统内核优化（强烈推荐）
 #   -m : 调优模式 (1: 极限刷流 / 2: 均衡保种) [默认 1]
 #   -o : 自定义端口 (会提示输入)
@@ -257,10 +257,13 @@ uninstall() {
         "
     fi
 
-    execute_with_spinner "移除系统优化与内核回滚" sh -c "
+    execute_with_spinner "移除系统优化与内核回滚 (含服务扩展)" sh -c "
         systemctl stop asp-tune.service 2>/dev/null || true
+        systemctl stop asp-mediainfo.service 2>/dev/null || true
         systemctl disable asp-tune.service 2>/dev/null || true
+        systemctl disable asp-mediainfo.service 2>/dev/null || true
         rm -f /etc/systemd/system/asp-tune.service /usr/local/bin/asp-tune.sh /etc/sysctl.d/99-ptbox.conf
+        rm -f /etc/systemd/system/asp-mediainfo.service /usr/local/bin/asp-mediainfo.py
         [ -f /etc/security/limits.conf ] && sed -i '/# Auto-Seedbox-PT/d' /etc/security/limits.conf || true
     "
     
@@ -300,6 +303,7 @@ uninstall() {
             ufw delete allow $QB_BT_PORT/udp >/dev/null 2>&1 || true
             ufw delete allow $VX_PORT/tcp >/dev/null 2>&1 || true
             ufw delete allow $FB_PORT/tcp >/dev/null 2>&1 || true
+            ufw delete allow 8082/tcp >/dev/null 2>&1 || true
         fi
         if command -v firewalld >/dev/null && systemctl is-active --quiet firewalld; then
             firewall-cmd --zone=public --remove-port=\"$QB_WEB_PORT/tcp\" --permanent >/dev/null 2>&1 || true
@@ -307,6 +311,7 @@ uninstall() {
             firewall-cmd --zone=public --remove-port=\"$QB_BT_PORT/udp\" --permanent >/dev/null 2>&1 || true
             firewall-cmd --zone=public --remove-port=\"$VX_PORT/tcp\" --permanent >/dev/null 2>&1 || true
             firewall-cmd --zone=public --remove-port=\"$FB_PORT/tcp\" --permanent >/dev/null 2>&1 || true
+            firewall-cmd --zone=public --remove-port=\"8082/tcp\" --permanent >/dev/null 2>&1 || true
             firewall-cmd --reload >/dev/null 2>&1 || true
         fi
         if command -v iptables >/dev/null; then
@@ -315,6 +320,7 @@ uninstall() {
             iptables -D INPUT -p udp --dport $QB_BT_PORT -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport $VX_PORT -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport $FB_PORT -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p tcp --dport 8082 -j ACCEPT 2>/dev/null || true
             if command -v netfilter-persistent >/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1
             elif command -v iptables-save >/dev/null; then
@@ -909,15 +915,133 @@ EOF
     fi
 
     if [[ "$DO_FB" == "true" ]]; then
-        echo -e "  ${CYAN}▶ 正在处理 FileBrowser 核心逻辑...${NC}"
-        rm -rf "$HB/.config/filebrowser" "$HB/fb.db"; mkdir -p "$HB/.config/filebrowser" && touch "$HB/fb.db" && chmod 666 "$HB/fb.db"
+        echo -e "  ${CYAN}▶ 正在处理 FileBrowser 核心逻辑 (含 MediaInfo 极客扩展)...${NC}"
+        # 创建 branding 目录用于前端注入
+        rm -rf "$HB/.config/filebrowser" "$HB/fb.db"
+        mkdir -p "$HB/.config/filebrowser/branding" && touch "$HB/fb.db" && chmod 666 "$HB/fb.db"
+
+        # [注入1] 写入定制前端 JS (右键菜单拦截与弹窗 UI)
+        cat > "$HB/.config/filebrowser/branding/custom.js" << 'EOF_JS'
+(function() {
+    const script = document.createElement('script');
+    script.src = "https://cdn.jsdelivr.net/npm/sweetalert2@11";
+    document.head.appendChild(script);
+
+    function getCurrentPath() {
+        let path = window.location.pathname.replace(/^\/files/, '');
+        return decodeURIComponent(path) || '/';
+    }
+
+    document.addEventListener('mousedown', function(e) {
+        if (e.button !== 2) return; // 仅监听右键
+        let row = e.target.closest('.item');
+        if (!row) return;
+
+        let fileName = row.querySelector('.name').innerText.trim();
+        if (!fileName.match(/\.(mp4|mkv|avi|ts|iso|rmvb|wmv)$/i)) return; // 仅对视频文件生效
+
+        setTimeout(() => {
+            let menu = document.getElementById('dropdown');
+            if (menu && !document.getElementById('asp-mi-btn')) {
+                let li = document.createElement('button');
+                li.id = 'asp-mi-btn';
+                li.className = 'action';
+                li.innerHTML = '<i class="material-icons">info</i><span>MediaInfo</span>';
+                li.onclick = function() {
+                    let fullPath = (getCurrentPath() + '/' + fileName).replace(/\/\//g, '/');
+                    Swal.fire({
+                        title: '获取中...',
+                        text: '正在解析底层媒体信息',
+                        allowOutsideClick: false,
+                        didOpen: () => Swal.showLoading()
+                    });
+                    
+                    fetch(`http://${window.location.hostname}:8082/api/mi?file=${encodeURIComponent(fullPath)}`)
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.error) throw new Error(data.error);
+                        let html = `<div style="text-align:left; font-size:13px; background:#1e1e1e; color:#00ff00; padding:12px; border-radius:6px; max-height:450px; overflow-y:auto; white-space:pre-wrap; font-family:Consolas, monospace;">`;
+                        if (data.media && data.media.track) {
+                            data.media.track.forEach(t => {
+                                html += `[${t['@type']}]\n`;
+                                for (let k in t) { if (k !== '@type') html += `${k}: ${t[k]}\n`; }
+                                html += `\n`;
+                            });
+                        }
+                        html += `</div>`;
+                        Swal.fire({ title: fileName, html: html, width: '850px' });
+                    }).catch(err => Swal.fire('解析失败', err.toString(), 'error'));
+                };
+                menu.appendChild(li);
+            }
+        }, 80); // 等待 FB 菜单渲染
+    });
+})();
+EOF_JS
+
+        # [注入2] 编写并启动 Python API 微服务 (严格限制目录越权)
+        cat > /usr/local/bin/asp-mediainfo.py << 'EOF_PY'
+import http.server, socketserver, urllib.parse, subprocess, json, os, sys
+PORT = 8082
+BASE_DIR = sys.argv[1]
+
+class Handler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        parsed = urllib.parse.urlparse(self.path)
+        if parsed.path == '/api/mi':
+            query = urllib.parse.parse_qs(parsed.query)
+            file_path = query.get('file', [''])[0].lstrip('/')
+            full_path = os.path.abspath(os.path.join(BASE_DIR, file_path))
+
+            self.send_response(200)
+            self.send_header('Access-Control-Allow-Origin', '*')
+            self.send_header('Content-Type', 'application/json')
+            self.end_headers()
+
+            if not full_path.startswith(os.path.abspath(BASE_DIR)) or not os.path.isfile(full_path):
+                self.wfile.write(json.dumps({"error": "非法路径或文件不存在"}).encode('utf-8'))
+                return
+            try:
+                res = subprocess.run(['mediainfo', '--Output=JSON', full_path], capture_output=True, text=True)
+                self.wfile.write(res.stdout.encode('utf-8'))
+            except Exception as e:
+                self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
+        else:
+            self.send_response(404)
+            self.end_headers()
+
+socketserver.TCPServer.allow_reuse_address = True
+with socketserver.TCPServer(("", PORT), Handler) as httpd:
+    httpd.serve_forever()
+EOF_PY
+        chmod +x /usr/local/bin/asp-mediainfo.py
+
+        cat > /etc/systemd/system/asp-mediainfo.service << EOF
+[Unit]
+Description=ASP MediaInfo API Service
+After=network.target
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /usr/local/bin/asp-mediainfo.py "$HB"
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
+        systemctl daemon-reload && systemctl enable asp-mediainfo.service >/dev/null 2>&1
+        systemctl restart asp-mediainfo.service
+        open_port "8082" "tcp"
+
         chown -R "$APP_USER:$APP_USER" "$HB/.config/filebrowser" "$HB/fb.db"
 
         docker rm -f filebrowser &>/dev/null || true
         execute_with_spinner "拉取 FileBrowser 镜像" docker pull filebrowser/filebrowser:latest
 
+        # [注入3] 容器初始化，绑定 branding 目录
         docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config init || true
+        docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest config set --branding.files "/config/branding" || true
         docker run --rm --user 0:0 -v "$HB/fb.db":/database/filebrowser.db filebrowser/filebrowser:latest users add "$APP_USER" "$APP_PASS" --perm.admin || true
+        
         execute_with_spinner "启动 FileBrowser 容器" docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/fb.db":/database/filebrowser.db -v "$HB/.config/filebrowser":/config -p $FB_PORT:80 filebrowser/filebrowser:latest
         open_port "$FB_PORT"
     fi
@@ -960,8 +1084,8 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.1.0 ✦${NC}"
-echo -e "${PURPLE}           ✦              作者：Supcutie             ✦${NC}"
+echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.2.0 ✦${NC}"
+echo -e "${PURPLE}           ✦             作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
 echo -e "${BLUE}================================================================${NC}"
@@ -1054,7 +1178,7 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 execute_with_spinner "修复可能的系统包损坏状态" sh -c "dpkg --configure -a && apt-get --fix-broken install -y >/dev/null 2>&1 || true"
-execute_with_spinner "部署核心运行依赖 (curl, jq, tar...)" sh -c "apt-get -qq update && apt-get -qq install -y curl wget jq unzip tar python3 net-tools ethtool iptables"
+execute_with_spinner "部署核心运行依赖 (curl, jq, tar...)" sh -c "apt-get -qq update && apt-get -qq install -y curl wget jq unzip tar python3 net-tools ethtool iptables mediainfo"
 
 if [[ "$CUSTOM_PORT" == "true" ]]; then
     echo -e " ${CYAN}╔══════════════════ 自定义端口 ════════════════╗${NC}"
