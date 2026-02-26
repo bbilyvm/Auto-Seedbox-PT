@@ -12,7 +12,7 @@
 #   -v : 安装 Vertex
 #   -f : 安装 FileBrowser (含 MediaInfo 扩展)
 #   -t : 启用系统内核优化（强烈推荐）
-#   -m : 调优模式 (1: 极限刷流 / 2: 均衡保种) [默认 1]
+#   -m : 调优模式 (1: 极限抢种 / 2: 均衡保种) [默认 1]
 #   -o : 自定义端口 (会提示输入)
 #   -d : Vertex data 目录 ZIP/tar.gz 下载链接 (可选)
 #   -k : Vertex data ZIP 解压密码 (可选)
@@ -35,7 +35,6 @@ QB_BT_PORT=20000
 VX_PORT=3000
 FB_PORT=8081
 MI_PORT=8082
-
 
 APP_USER="admin"
 APP_PASS=""
@@ -359,24 +358,58 @@ uninstall() {
     exit 0
 }
 
-# ================= 4. 智能系统优化 =================
+# ================= 4. 智能系统优化 (多阶层动态自适应版) =================
+
+# ================= 4. 智能系统优化 (多阶层动态自适应版 - 爆改激进版) =================
 
 optimize_system() {
     echo ""
-    echo -e " ${CYAN}╔══════════════════ 系统内核优化 (ASP-Tuned) ══════════════════╗${NC}"
+    echo -e " ${CYAN}╔══════════════════ 系统内核优化 (ASP-Tuned Elite) ══════════════════╗${NC}"
     echo ""
     echo -e "  ${CYAN}▶ 正在深度接管系统调度与网络协议栈...${NC}"
     
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-    local rmem_max=$((mem_kb * 1024 / 2))
-    local tcp_mem_min=$((mem_kb / 16)); local tcp_mem_def=$((mem_kb / 8)); local tcp_mem_max=$((mem_kb / 4))
+    local mem_gb_sys=$((mem_kb / 1024 / 1024))
     
+    # 基础安全底线 (面向 4GB - 8GB 的常规 VPS)
+    local rmem_max=67108864      # 64MB TCP缓冲
     local dirty_ratio=20
     local dirty_bg_ratio=5
-    local dirty_bytes=""
-    local dirty_bg_bytes=""
-    local backlog=65535
+    local backlog=30000          # 黄金队列长度，防 CPU Steal
     local syn_backlog=65535
+    
+    if [[ "$TUNE_MODE" == "1" ]]; then
+        # 【动态自适应计算：全面解除 NVMe 封印】
+        if [[ $mem_gb_sys -ge 30 ]]; then
+            # 纯血独服/大内存怪兽 (32G+)：极度奔放，TCP 缓冲拉满 1GB
+            rmem_max=1073741824
+            dirty_ratio=50
+            dirty_bg_ratio=15
+            backlog=100000
+            syn_backlog=200000
+            echo -e "  ${PURPLE}↳ 检测到纯血级算力 (>=32GB)，已解锁最高序列内核权限 (1GB Buffer)！${NC}"
+        elif [[ $mem_gb_sys -ge 15 ]]; then
+            # 中大型 VPS/独服 (16G-31G)：平衡吞吐与延迟，TCP 缓冲 512MB
+            rmem_max=536870912
+            dirty_ratio=40
+            dirty_bg_ratio=10
+            backlog=50000
+            syn_backlog=100000
+            echo -e "  ${PURPLE}↳ 检测到中大型算力 (>=16GB)，已挂载进阶序列内核权限 (512MB Buffer)。${NC}"
+        else
+            # 常规级算力 (如 NCG9.5 8G)：匹配 2.5G 端口，TCP 缓冲 256MB，释放 NVMe 顺序写能力
+            rmem_max=268435456
+            dirty_ratio=30
+            dirty_bg_ratio=10
+            backlog=30000
+            syn_backlog=65535
+            echo -e "  ${PURPLE}↳ 检测到常规级算力 (<16GB)，已为您挂载 NVMe 激进并发矩阵 (256MB Buffer)。${NC}"
+        fi
+    fi
+
+    local tcp_wmem="4096 65536 $rmem_max"
+    local tcp_rmem="4096 87380 $rmem_max"
+    local tcp_mem_min=$((mem_kb / 16)); local tcp_mem_def=$((mem_kb / 8)); local tcp_mem_max=$((mem_kb / 4))
     
     # 智能穿透侦测 BBR 版本
     local avail_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "bbr cubic reno")
@@ -385,31 +418,6 @@ optimize_system() {
     local ui_cc="bbr"
 
     if [[ "$TUNE_MODE" == "1" ]]; then
-        # 【动态自适应计算】基于物理内存动态分配 TCP 最大缓冲区与系统队列
-        local mem_gb_sys=$((mem_kb / 1024 / 1024))
-        # 预留内存的 5% 作为极端情况下的套接字顶峰缓冲，并乘以 51 防整数溢出 (近似 1024 * 0.05)
-        local mem_5_percent=$((mem_kb * 51)) 
-        
-        # 最高封顶 1GB 缓冲区
-        if [[ $mem_5_percent -gt 1073741824 ]]; then
-            rmem_max=1073741824
-        else
-            rmem_max=$mem_5_percent
-        fi
-        
-        tcp_wmem="4096 65536 $rmem_max"
-        tcp_rmem="4096 87380 $rmem_max"
-        dirty_bytes=268435456
-        dirty_bg_bytes=67108864
-        
-        if [[ $mem_gb_sys -ge 16 ]]; then
-            backlog=250000
-            syn_backlog=819200
-        else
-            backlog=100000
-            syn_backlog=204800
-        fi
-        
         # BBRv3 / BBRx 穿透识别逻辑
         if echo "$avail_cc" | grep -qw "bbrx" || echo "$kernel_name" | grep -q "bbrx"; then
             target_cc=$(echo "$avail_cc" | grep -qw "bbrx" && echo "bbrx" || echo "bbr")
@@ -422,12 +430,6 @@ optimize_system() {
         if [ ! -f /etc/asp_original_governor ]; then
             cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null > /etc/asp_original_governor || echo "ondemand" > /etc/asp_original_governor
         fi
-    else
-        [[ $rmem_max -gt 134217728 ]] && rmem_max=134217728
-        tcp_wmem="4096 65536 $rmem_max"
-        tcp_rmem="4096 87380 $rmem_max"
-        dirty_ratio=20
-        dirty_bg_ratio=5
     fi
 
     cat > /etc/sysctl.d/99-ptbox.conf << EOF
@@ -436,17 +438,11 @@ fs.nr_open = 1048576
 vm.swappiness = 1
 EOF
 
-    if [[ "$TUNE_MODE" == "1" ]]; then
-        cat >> /etc/sysctl.d/99-ptbox.conf << EOF
-vm.dirty_bytes = $dirty_bytes
-vm.dirty_background_bytes = $dirty_bg_bytes
-EOF
-    else
-        cat >> /etc/sysctl.d/99-ptbox.conf << EOF
+    # 核心修改：Mode 1 彻底废弃死板的 dirty_bytes，全面拥抱 ratio
+    cat >> /etc/sysctl.d/99-ptbox.conf << EOF
 vm.dirty_ratio = $dirty_ratio
 vm.dirty_background_ratio = $dirty_bg_ratio
 EOF
-    fi
 
     cat >> /etc/sysctl.d/99-ptbox.conf << EOF
 net.core.default_qdisc = fq
@@ -533,26 +529,26 @@ WantedBy=multi-user.target
 EOF
     systemctl daemon-reload && systemctl enable asp-tune.service >/dev/null 2>&1
 
-    execute_with_spinner "注入百万级并发与高吞吐网络参数" sysctl --system
+    execute_with_spinner "注入高吞吐网络参数 (防 Bufferbloat 策略)" sysctl --system
     execute_with_spinner "重载网卡队列与 CPU 性能调度器" systemctl start asp-tune.service || true
     
     local rmem_mb=$((rmem_max / 1024 / 1024))
     echo ""
-    echo -e "  ${PURPLE}[⚡ ASP-Tuned 核心调优矩阵已挂载]${NC}"
+    echo -e "  ${PURPLE}[⚡ ASP-Tuned Elite 核心调优已挂载]${NC}"
     echo -e "  ${CYAN}├─${NC} 拥塞控制算法 : ${GREEN}${ui_cc}${NC} (智能穿透匹配)"
     echo -e "  ${CYAN}├─${NC} 全局并发上限 : ${YELLOW}1,048,576${NC} (解除 Socket 封印)"
-    echo -e "  ${CYAN}├─${NC} TCP 缓冲上限 : ${YELLOW}${rmem_mb} MB${NC} (极限吞吐保障)"
+    echo -e "  ${CYAN}├─${NC} TCP 缓冲上限 : ${YELLOW}${rmem_mb} MB${NC} (动态智能感知)"
     if [[ "$TUNE_MODE" == "1" ]]; then
-        echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}bytes=${dirty_bytes}, bg_bytes=${dirty_bg_bytes}${NC} (防 I/O 阻塞)"
+        echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (激进写盘适配 NVMe)"
         echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${RED}performance${NC} (锁定最高主频)"
     else
-        echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (防 I/O 阻塞)"
+        echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (均衡平稳回写)"
         echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${GREEN}ondemand/schedutil${NC} (动态节能)"
     fi
-    echo -e "  ${CYAN}└─${NC} 磁盘与网卡流 : ${YELLOW}I/O Multi-Queue & TX-Queue 扩容${NC}"
+    echo -e "  ${CYAN}└─${NC} 磁盘与网卡流 : ${YELLOW}I/O Multi-Queue & TX-Queue 优化${NC}"
     echo ""
 
-    echo -e " ${GREEN}[√] 底层内核引擎 (Mode $TUNE_MODE) 已全面接管！${NC}"
+    echo -e " ${GREEN}[√] 阶梯自适应内核引擎 (Mode $TUNE_MODE) 已全面接管！${NC}"
 }
 
 # ================= 5. 应用部署逻辑 =================
@@ -696,64 +692,79 @@ EOF
         
         curl -s -b "$TEMP_DIR/qb_cookie.txt" --max-time 5 "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/preferences" > "$TEMP_DIR/current_pref.json"
         
-        local patch_json="{\"locale\":\"zh_CN\",\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"file_pool_size\":5000,\"peer_tos\":184"
+        # 基础防漏与协议参数 
+        local patch_json="{\"locale\":\"zh_CN\",\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"file_pool_size\":5000,\"peer_tos\":2"
         
         if [[ "$TUNE_MODE" == "1" ]]; then
-            # 【动态自适应计算】基于硬件规模收敛极限模式并发参数
             local mem_kb_qbit=$(grep MemTotal /proc/meminfo | awk '{print $2}')
             local mem_gb_qbit=$((mem_kb_qbit / 1024 / 1024))
             
-            # 动态 I/O 线程: 核心数 x 4 (安全边界: 最少8，最多32)
-            local dyn_async_io=$((hash_threads * 4))
-            [[ $dyn_async_io -gt 32 ]] && dyn_async_io=32
-            [[ $dyn_async_io -lt 8 ]] && dyn_async_io=8
-            
-            # 默认赋予无限连接 (面向 32G+ 纯血独服)
-            local dyn_max_connec=-1
-            local dyn_max_connec_tor=-1
-            local dyn_max_up=-1
-            local dyn_max_up_tor=-1
+            # 【核心重构：彻底解除并发锁死，拥抱高水位】
+            local dyn_async_io=8
+            local dyn_max_connec=20000
+            local dyn_max_connec_tor=1000
+            local dyn_max_up=5000
+            local dyn_max_up_tor=300
             local dyn_half_open=500
-            
-            # 针对 16G 级别机器 (实际可用内存约 15G+)
-            if [[ $mem_gb_qbit -lt 30 ]]; then
-                dyn_max_connec=8000
+            local send_buf=20480
+            local send_buf_low=5120
+
+            if [[ $mem_gb_qbit -ge 30 ]]; then
+                # 纯血物理独服 (32G+)：海量并发轰炸，超级水位
+                dyn_async_io=24
+                dyn_max_connec=80000
+                dyn_max_connec_tor=5000
+                dyn_max_up=20000
+                dyn_max_up_tor=1000
+                dyn_half_open=2000
+                send_buf=51200
+                send_buf_low=10240
+            elif [[ $mem_gb_qbit -ge 15 ]]; then
+                # 中大型机器 (16G-31G)：阶梯放宽
+                dyn_async_io=16
+                dyn_max_connec=40000
+                dyn_max_connec_tor=2000
+                dyn_max_up=10000
+                dyn_max_up_tor=500
+                dyn_half_open=1000
+                send_buf=40960
+                send_buf_low=10240
+            elif [[ $mem_gb_qbit -lt 6 ]]; then
+                # 入门级小鸡 (<6G)：防死机收敛
+                dyn_async_io=4
+                dyn_max_connec=5000
                 dyn_max_connec_tor=500
-                dyn_max_up=3000
+                dyn_max_up=1000
                 dyn_max_up_tor=100
                 dyn_half_open=300
-            fi
-            
-            # 针对 8G 级别小钢炮 (实际可用内存约 7.5G+，如 Netcup G9.5)
-            # 【解除封印】将单种连接提升至 250，全局 4000，足以打满 2.5Gbps
-            if [[ $mem_gb_qbit -lt 14 ]]; then
-                dyn_max_connec=4000
-                dyn_max_connec_tor=250
-                dyn_max_up=1500
-                dyn_max_up_tor=60
-                dyn_half_open=150
-            fi
-            
-            # 针对 4G 及以下小鸡 (实际可用内存约 3.7G+)
-            if [[ $mem_gb_qbit -lt 6 ]]; then
-                dyn_max_connec=1500
-                dyn_max_connec_tor=100
-                dyn_max_up=500
-                dyn_max_up_tor=30
-                dyn_half_open=50
+                send_buf=10240
+                send_buf_low=3072
+            else
+                # 常规机器 (6G-14G，涵盖 NCG9.5)：激进并发
+                dyn_async_io=8
+                dyn_max_connec=20000
+                dyn_max_connec_tor=1000
+                dyn_max_up=5000
+                dyn_max_up_tor=300
+                dyn_half_open=500
+                send_buf=30720
+                send_buf_low=8192
             fi
 
-            patch_json="${patch_json},\"max_connec\":${dyn_max_connec},\"max_connec_per_torrent\":${dyn_max_connec_tor},\"max_uploads\":${dyn_max_up},\"max_uploads_per_torrent\":${dyn_max_up_tor},\"max_half_open_connections\":${dyn_half_open},\"send_buffer_watermark\":51200,\"send_buffer_low_watermark\":10240,\"send_buffer_tos_mark\":2,\"connection_speed\":1000,\"peer_timeout\":120,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":${dyn_async_io},\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
+            # 注入阶梯化参数与 Elite 级快速剔除算法
+            patch_json="${patch_json},\"max_connec\":${dyn_max_connec},\"max_connec_per_torrent\":${dyn_max_connec_tor},\"max_uploads\":${dyn_max_up},\"max_uploads_per_torrent\":${dyn_max_up_tor},\"max_half_open_connections\":${dyn_half_open},\"send_buffer_watermark\":${send_buf},\"send_buffer_low_watermark\":${send_buf_low},\"connection_speed\":2000,\"peer_timeout\":45,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":${dyn_async_io},\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
         else
-            patch_json="${patch_json},\"max_connec\":2000,\"max_connec_per_torrent\":100,\"max_uploads\":500,\"max_uploads_per_torrent\":20,\"max_half_open_connections\":50,\"send_buffer_watermark\":10240,\"send_buffer_low_watermark\":3072,\"send_buffer_tos_mark\":2,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":8"
+            # 【M2 均衡保种】放宽心跳检测，采用轮询公平算法，低耗长效保种
+            patch_json="${patch_json},\"max_connec\":1500,\"max_connec_per_torrent\":100,\"max_uploads\":300,\"max_uploads_per_torrent\":30,\"max_half_open_connections\":50,\"send_buffer_watermark\":10240,\"send_buffer_low_watermark\":3072,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":4"
         fi
         
         if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
-            # 【双模动态 I/O API注入修复】
+            # V5 mmap 必须设限
             local io_mode=1
             [[ "$TUNE_MODE" == "1" ]] && io_mode=0
             patch_json="${patch_json},\"memory_working_set_limit\":$cache_val,\"disk_io_type\":2,\"disk_io_read_mode\":$io_mode,\"disk_io_write_mode\":$io_mode,\"hashing_threads\":$hash_threads"
         else
+            # V4 物理内存缓存策略
             if [[ "$TUNE_MODE" == "1" ]]; then
                 patch_json="${patch_json},\"disk_cache\":$cache_val,\"disk_cache_ttl\":600"
             else
@@ -782,7 +793,7 @@ EOF
         local http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -b "$TEMP_DIR/qb_cookie.txt" -X POST --data-urlencode "json=$final_payload" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/setPreferences")
         
         if [[ "$http_code" == "200" ]]; then
-            echo -e " ${GREEN}[√]${NC} 引擎防泄漏与底层网络已完全锁定为极速状态！"
+            echo -e " ${GREEN}[√]${NC} 引擎防泄漏与底层网络已完全锁定为极致状态！"
             systemctl restart "qbittorrent-nox@$APP_USER"
         else
             echo -e " ${RED}[X]${NC} API 注入失败 (Code: $http_code)，请手动配置。"
@@ -1106,8 +1117,8 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}        ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.7 ✦${NC}"
-echo -e "${PURPLE}        ✦              作者：Supcutie              ✦${NC}"
+echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) Elite 极限部署引擎 v3.0.1 ✦${NC}"
+echo -e "${PURPLE}     ✦              作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
 echo -e "${BLUE}================================================================${NC}"
@@ -1166,15 +1177,15 @@ echo ""
 
 if [[ "$DO_TUNE" == "true" ]]; then
     if [[ "$TUNE_MODE" == "1" ]]; then
-        echo -e "  当前选定模式: ${RED}极限刷流 (Mode 1 - 智能自适应)${NC}"
-        echo -e "  推荐场景:     ${YELLOW}大内存/G口/万兆独服抢种${NC}"
-        echo -e "  风险提示:     ${RED}会锁定CPU高频并暴增内核缓冲区，极大消耗内存！${NC}"
+        echo -e "  当前选定模式: ${RED}极限抢种 (Mode 1 - Elite Dynamic)${NC}"
+        echo -e "  推荐场景:     ${YELLOW}抢种打榜 / 追求瞬时满速爆发${NC}"
+        echo -e "  机制提示:     ${GREEN}阶梯自适应并发墙，防死锁微量写盘，最快上传匹配。${NC}"
         echo ""
-        echo -e "  ${YELLOW}请确认上方风险，3秒后开始部署...${NC}"
+        echo -e "  ${YELLOW}即刻为您加载极限引擎，3秒后开始部署...${NC}"
         sleep 3
     else
-        echo -e "  当前选定模式: ${GREEN}均衡保种 (Mode 2)${NC}"
-        echo -e "  推荐场景:     ${GREEN}家用NAS/普通VPS稳定保种${NC}"
+        echo -e "  当前选定模式: ${GREEN}均衡保种 (Mode 2 - Stable)${NC}"
+        echo -e "  推荐场景:     ${GREEN}长期养站 / 低耗稳定做种${NC}"
         if [[ "$tune_downgraded" == "true" ]]; then
             echo -e "  ${YELLOW}※ 已触发防呆机制，为您强制降级至此模式以防 OOM 死机。${NC}"
         fi
@@ -1236,9 +1247,9 @@ PUB_IP=$(curl -s --max-time 5 https://api.ipify.org || echo "ServerIP")
 
 tune_str=""
 if [[ "$TUNE_MODE" == "1" ]]; then
-    tune_str="${RED}Mode 1 (极限刷流)${NC}"
+    tune_str="${RED}Mode 1 (极限抢种 - Elite)${NC}"
 else
-    tune_str="${GREEN}Mode 2 (均衡保种)${NC}"
+    tune_str="${GREEN}Mode 2 (均衡保种 - Stable)${NC}"
 fi
 
 # ================= 极简极客版终端 Dashboard =================
