@@ -175,6 +175,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 ---
 
+## 推荐方案 
 
 针对目前最新的 v2.3.x 及以上版本脚本，这里总结一下硬件搭配的推荐方案，如下表所示：
 
