@@ -12,7 +12,6 @@
     <a href="#-参数详解">参数配置</a> • 
     <a href="#-架构解析">架构解析</a> • 
     <a href="#-常见问题-faq">常见问题</a>
-  </strong>
 </p>
 
 **Auto-Seedbox-PT** 是一个高度智能化的 Shell 脚本，旨在彻底简化 PT 专用服务器（Seedbox）的部署流程。它不仅能一键安装 qBittorrent、Vertex 和 FileBrowser，更内置了极其硬核的**系统级内核调优引擎**。
@@ -32,7 +31,7 @@
 ### 📦 底层依赖精准锁定 (libtorrent Version Lock)
 摒弃繁琐的手动试错，脚本会自动抓取静态编译包并匹配最完美的底层库：
 * **v4 模式 (4.3.9 + v1 引擎)**：强制绑定 **libtorrent v1.2.x**。精准控制内存缓存，规避内存泄漏，单核效率极高，是 PT 圈公认的保种神油养老版。
-* **v5 模式 (最新/指定版 + 极致 I/O)**：强制绑定 **libtorrent v2.0.x**。彻底颠覆传统的内存映射（MMap）带来的卡顿，脚本会**强制接管 v5.x 的底层设定，开启 POSIX 和 Direct I/O（绕过系统缓存）**。配合大内存与高速 NVMe，彻底释放硬件潜能，是目前万兆网络抢首发的最强利器。z
+* **v5 模式 (最新/指定版 + 极致 I/O)**：强制绑定 **libtorrent v2.0.x**。彻底颠覆传统的内存映射（MMap）带来的卡顿，脚本会**强制接管 v5.x 的底层设定，开启 POSIX 和 Direct I/O（绕过系统缓存）**。配合大内存与高速 NVMe，彻底释放硬件潜能，是目前万兆网络抢首发的最强利器。
 
 ### 🎬 独家 FileBrowser 极客扩展 (MediaInfo 深度集成)
 不仅仅是安装 FileBrowser！脚本会在底层为你挂载一套零侵入的 MediaInfo 微服务架构，专为 PT 发种与查阅打造：
@@ -65,25 +64,31 @@
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5 -m 1 -v -f -t
 ```
 
-### 2. 均衡模式（保种刷流 首选）
+### 2. 高性能 VPS 抢跑（如 Netcup G9.5 / 中大内存 VPS 首选）
+安装响应最快的 qBittorrent 4.3.9 + 附加组件，启用 极限刷流模式（利用 v4 物理内存缓存优势，配合脚本激进并发墙，榨干 2.5G/10G 端口）：
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 4.3.9 -m 1 -v -f -t
+```
+
+### 3. 均衡模式（保种刷流 首选）
 安装最稳的 qBittorrent 4.3.9 + 附加组件，启用 **均衡保种模式**（稳定低负载，大缓存）：
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 4.3.9 -m 2 -v -f -t
 ```
 
-### 3. 自定义端口（交互模式）
+### 4. 自定义端口（交互模式）
 使用 `-o` 参数在安装时手动指定各个组件的端口：
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -v -f -t -o
 ```
 
-### 4. 精准版本 & 自定义端口（交互模式）
+### 5. 精准版本 & 自定义端口（交互模式）
 精准安装 `5.0.4` 版本，并使用 `-o` 参数在安装时手动指定各个组件的端口：
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5.0.4 -v -f -t -o
 ```
 
-### 5. 基础极简版（仅 qBittorrent）
+### 6. 基础极简版（仅 qBittorrent）
 不装面板和文件管理器，纯净部署 qBit 和基础系统优化：
 ```bash
 bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/main/auto_seedbox_pt.sh) -u 用户名 -p 密码 -q 5 -m 2 -t
@@ -102,7 +107,7 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 | 参数 | 必填 | 描述 | 示例 |
 |:---:|:---:|---|---|
 | `-u` | ✅ | WebUI 及面板用户名 | `-u admin` |
-| `-p` | ✅ | 统一密码（必须 ≥ 8 位） | `-p mysecurepass` |
+| `-p` | ✅ | 统一密码（必须 ≥ 12 位） | `-p mysecurepass` |
 | `-m` | ⭕ | **调优模式**：`1`(极限刷流) 或 `2`(均衡保种)。默认 `1` | `-m 1` |
 | `-q` | ⭕ | qBit 版本（默认5.0.4）：`4.3.9`、`5`、`latest` 或 `5.0.4` 等确切版本 | `-q 5.0.4` |
 | `-c` | ⭕ | 强制指定缓存大小(MB)。*若不填，脚本将根据物理内存自动计算最佳值* | `-c 4096` |
@@ -189,9 +194,9 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 以常见的 Netcup G9.5（2.5G 带宽、320G SSD、8G 内存）为例，目前推荐使用 **qBittorrent 5.x + 极限模式 (-m 1)**：
 - **为什么可以用 5.x？** 因为是纯 SSD 环境，5.x 的 I/O 模型在 SSD 上表现优秀，校验速度快。
-- **为什么敢用 `-m 1`？** 脚本检测到 8G 内存后，会自动将全局并发限制在 4000 左右，单种连接限制在 250，TCP 缓冲区控制在物理内存的 5% 以内。这样既能跑满 2.5Gbps（约 300MB/s）带宽，又不会引起 CPU 或 PPS 过高，从而避免被服务商判定为滥用（Abuse）。
+- **为什么敢用 `-m 1`？** 脚本检测到 8G 内存后，会自动将全局并发可达两万级，单种连接一千，TCP 缓冲区控制在物理内存的 5% 以内。这样既能跑满 2.5Gbps（约 300MB/s）带宽，又不会引起 CPU 或 PPS 过高，从而避免被服务商判定为滥用（Abuse）。
 - **缓存自动配置**：即使不加 `-c` 参数，脚本在极限模式下也会自动分配约 35% 的物理内存作为缓存（8G 机器约 2.8G），保留足够内存给系统网络栈。
-- **文件管理面板**：加上 `-f` 参数，脚本会部署 FileBrowser 扩展版，支持通过网页查看文件、显示 MediaInfo 媒体信息、一键复制格式化的信息，方便发种。该面板仅内网访问，相对安全。
+- **文件管理面板**：加上 `-f` 参数，脚本会部署 FileBrowser 扩展版，支持通过网页查看文件、显示 MediaInfo 媒体信息、一键复制格式化的信息，方便发种。该面板通过 Nginx 进行了安全反代，并清除了跨域特征，确保公网访问的隐蔽性与安全性。
 
 **Netcup G9.5（及类似配置 VPS）一键部署命令示例：**
 （注意：此处保留了 `-c 2048` 强制锁定 2GB 缓存，端口可根据需要修改）
