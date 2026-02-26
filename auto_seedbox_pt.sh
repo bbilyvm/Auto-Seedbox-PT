@@ -34,6 +34,7 @@ QB_WEB_PORT=8080
 QB_BT_PORT=20000
 VX_PORT=3000
 FB_PORT=8081
+MI_PORT=8082
 
 APP_USER="admin"
 APP_PASS=""
@@ -296,6 +297,8 @@ uninstall() {
     sysctl -w vm.dirty_background_ratio=10 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
     
+    local uninstall_mi_port=${MI_PORT:-8082}
+
     execute_with_spinner "清理防火墙规则遗留" sh -c "
         if command -v ufw >/dev/null && systemctl is-active --quiet ufw; then
             ufw delete allow $QB_WEB_PORT/tcp >/dev/null 2>&1 || true
@@ -303,7 +306,7 @@ uninstall() {
             ufw delete allow $QB_BT_PORT/udp >/dev/null 2>&1 || true
             ufw delete allow $VX_PORT/tcp >/dev/null 2>&1 || true
             ufw delete allow $FB_PORT/tcp >/dev/null 2>&1 || true
-            ufw delete allow 8082/tcp >/dev/null 2>&1 || true
+            ufw delete allow $uninstall_mi_port/tcp >/dev/null 2>&1 || true
         fi
         if command -v firewalld >/dev/null && systemctl is-active --quiet firewalld; then
             firewall-cmd --zone=public --remove-port=\"$QB_WEB_PORT/tcp\" --permanent >/dev/null 2>&1 || true
@@ -311,7 +314,7 @@ uninstall() {
             firewall-cmd --zone=public --remove-port=\"$QB_BT_PORT/udp\" --permanent >/dev/null 2>&1 || true
             firewall-cmd --zone=public --remove-port=\"$VX_PORT/tcp\" --permanent >/dev/null 2>&1 || true
             firewall-cmd --zone=public --remove-port=\"$FB_PORT/tcp\" --permanent >/dev/null 2>&1 || true
-            firewall-cmd --zone=public --remove-port=\"8082/tcp\" --permanent >/dev/null 2>&1 || true
+            firewall-cmd --zone=public --remove-port=\"$uninstall_mi_port/tcp\" --permanent >/dev/null 2>&1 || true
             firewall-cmd --reload >/dev/null 2>&1 || true
         fi
         if command -v iptables >/dev/null; then
@@ -320,7 +323,7 @@ uninstall() {
             iptables -D INPUT -p udp --dport $QB_BT_PORT -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport $VX_PORT -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport $FB_PORT -j ACCEPT 2>/dev/null || true
-            iptables -D INPUT -p tcp --dport 8082 -j ACCEPT 2>/dev/null || true
+            iptables -D INPUT -p tcp --dport $uninstall_mi_port -j ACCEPT 2>/dev/null || true
             if command -v netfilter-persistent >/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1
             elif command -v iptables-save >/dev/null; then
@@ -956,7 +959,7 @@ EOF
                         didOpen: () => Swal.showLoading()
                     });
                     
-                    fetch(`http://${window.location.hostname}:8082/api/mi?file=${encodeURIComponent(fullPath)}`)
+                    fetch(`http://${window.location.hostname}:__MI_PORT__/api/mi?file=${encodeURIComponent(fullPath)}`)
                     .then(res => res.json())
                     .then(data => {
                         if (data.error) throw new Error(data.error);
@@ -978,11 +981,13 @@ EOF
     });
 })();
 EOF_JS
+        # 动态替换 JS 中的端口号占位符
+        sed -i "s/__MI_PORT__/${MI_PORT}/g" "$HB/.config/filebrowser/branding/custom.js"
 
         # [注入2] 编写并启动 Python API 微服务 (严格限制目录越权)
         cat > /usr/local/bin/asp-mediainfo.py << 'EOF_PY'
 import http.server, socketserver, urllib.parse, subprocess, json, os, sys
-PORT = 8082
+PORT = __MI_PORT__
 BASE_DIR = sys.argv[1]
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -1014,6 +1019,8 @@ socketserver.TCPServer.allow_reuse_address = True
 with socketserver.TCPServer(("", PORT), Handler) as httpd:
     httpd.serve_forever()
 EOF_PY
+        # 动态替换 Python API 中的端口号占位符
+        sed -i "s/__MI_PORT__/${MI_PORT}/g" /usr/local/bin/asp-mediainfo.py
         chmod +x /usr/local/bin/asp-mediainfo.py
 
         cat > /etc/systemd/system/asp-mediainfo.service << EOF
@@ -1030,7 +1037,9 @@ WantedBy=multi-user.target
 EOF
         systemctl daemon-reload && systemctl enable asp-mediainfo.service >/dev/null 2>&1
         systemctl restart asp-mediainfo.service
-        open_port "8082" "tcp"
+        
+        # 动态放行 MediaInfo 防火墙端口
+        open_port "$MI_PORT" "tcp"
 
         chown -R "$APP_USER:$APP_USER" "$HB/.config/filebrowser" "$HB/fb.db"
 
@@ -1186,6 +1195,7 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     QB_WEB_PORT=$(get_input_port "qBit WebUI" 8080); QB_BT_PORT=$(get_input_port "qBit BT监听" 20000)
     [[ "$DO_VX" == "true" ]] && VX_PORT=$(get_input_port "Vertex" 3000)
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
+    [[ "$DO_FB" == "true" ]] && MI_PORT=$(get_input_port "MediaInfo API" 8082)
 fi
 
 cat > "$ASP_ENV_FILE" << EOF
@@ -1193,6 +1203,7 @@ export QB_WEB_PORT=$QB_WEB_PORT
 export QB_BT_PORT=$QB_BT_PORT
 export VX_PORT=${VX_PORT:-3000}
 export FB_PORT=${FB_PORT:-8081}
+export MI_PORT=${MI_PORT:-8082}
 EOF
 chmod 600 "$ASP_ENV_FILE"
 
@@ -1234,6 +1245,7 @@ echo -e "     └─ 内部直连 qBit  : ${YELLOW}$VX_GW:$QB_WEB_PORT${NC}"
 fi
 if [[ "$DO_FB" == "true" ]]; then
 echo -e "  📁 FileBrowser 文件  : ${GREEN}http://$PUB_IP:$FB_PORT${NC}"
+echo -e "     └─ MediaInfo 服务 : ${YELLOW}运行于后台 $MI_PORT 端口${NC}"
 fi
 
 echo ""
