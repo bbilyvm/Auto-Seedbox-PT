@@ -334,7 +334,7 @@ uninstall() {
 
     log_warn "清理配置文件..."
     if [[ -d "$target_home" ]]; then
-         rm -rf "$target_home/.config/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser" "$target_home/filebrowser_data"
+         rm -rf "$target_home/.config/qBittorrent" "$target_home/.local/share/qBittorrent" "$target_home/.cache/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser" "$target_home/filebrowser_data"
          log_info "已清理 $target_home 下的配置文件。"
          
          if [[ -d "$target_home/Downloads" ]]; then
@@ -351,7 +351,7 @@ uninstall() {
              echo -e "${YELLOW}=================================================${NC}"
          fi
     fi
-    rm -rf "/root/.config/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/filebrowser_data" "$ASP_ENV_FILE"
+    rm -rf "/root/.config/qBittorrent" "/root/.local/share/qBittorrent" "/root/.cache/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/filebrowser_data" "$ASP_ENV_FILE"
     log_warn "建议重启服务器 (reboot) 以彻底清理内核内存驻留。"
     
     log_info "卸载完成。"
@@ -1117,7 +1117,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) Elite 极限部署引擎 v3.0.1 ✦${NC}"
+echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.0.1 ✦${NC}"
 echo -e "${PURPLE}     ✦              作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
