@@ -681,7 +681,7 @@ EOF
     printf "\e[?25l"
     for i in {1..20}; do
         printf "\r\033[K ${CYAN}[⠧]${NC} 轮询探测 API 接口引擎存活状态... ($i/20)"
-        if curl -s -f "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/version" >/dev/null; then
+        if curl -s -f --max-time 2 "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/version" >/dev/null; then
             api_ready=true
             break
         fi
@@ -692,9 +692,9 @@ EOF
     if [[ "$api_ready" == "true" ]]; then
         printf "\r\033[K ${GREEN}[√]${NC} API 引擎握手成功！开始下发高级底层配置... \n"
         
-        curl -s -c "$TEMP_DIR/qb_cookie.txt" --data "username=$APP_USER&password=$APP_PASS" "http://127.0.0.1:$QB_WEB_PORT/api/v2/auth/login" >/dev/null
+        curl -s -c "$TEMP_DIR/qb_cookie.txt" --max-time 5 --data "username=$APP_USER&password=$APP_PASS" "http://127.0.0.1:$QB_WEB_PORT/api/v2/auth/login" >/dev/null
         
-        curl -s -b "$TEMP_DIR/qb_cookie.txt" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/preferences" > "$TEMP_DIR/current_pref.json"
+        curl -s -b "$TEMP_DIR/qb_cookie.txt" --max-time 5 "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/preferences" > "$TEMP_DIR/current_pref.json"
         
         local patch_json="{\"locale\":\"zh_CN\",\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"file_pool_size\":5000,\"peer_tos\":184"
         
@@ -779,7 +779,7 @@ EOF
             echo -e "  ${YELLOW}[WARN] 未检测到 jq 依赖或拉取初始配置失败，已触发防呆回退机制 (直接下发补丁)。${NC}"
         fi
 
-        local http_code=$(curl -s -o /dev/null -w "%{http_code}" -b "$TEMP_DIR/qb_cookie.txt" -X POST --data-urlencode "json=$final_payload" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/setPreferences")
+        local http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -b "$TEMP_DIR/qb_cookie.txt" -X POST --data-urlencode "json=$final_payload" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/setPreferences")
         
         if [[ "$http_code" == "200" ]]; then
             echo -e " ${GREEN}[√]${NC} 引擎防泄漏与底层网络已完全锁定为极速状态！"
@@ -1106,7 +1106,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}        ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.6 ✦${NC}"
+echo -e "${PURPLE}        ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.7 ✦${NC}"
 echo -e "${PURPLE}        ✦              作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
@@ -1259,6 +1259,9 @@ echo -e "  ▶ 运行用户 : ${YELLOW}$APP_USER${NC} (已做运行目录隔离�
 echo ""
 echo -e " ------------------------ ${CYAN}🌐 终端访问地址${NC} ------------------------"
 echo -e "  🧩 qBittorrent WebUI : ${GREEN}http://$PUB_IP:$QB_WEB_PORT${NC} (若不是中文，请按Ctrl+F5清空缓存)"
+if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
+    echo -e "  ${YELLOW}💡 温馨提示: qBit 5.x 官方新版 UI 偶有显示延迟。若首次登录看到 0 个种子，请按 Ctrl+F5 强制刷新页面即可正常加载。${NC}"
+fi
 if [[ "$DO_VX" == "true" ]]; then
 echo -e "  🌐 Vertex 智控面板   : ${GREEN}http://$PUB_IP:$VX_PORT${NC}"
 echo -e "     └─ 内部直连 qBit  : ${YELLOW}$VX_GW:$QB_WEB_PORT${NC}"
