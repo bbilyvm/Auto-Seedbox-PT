@@ -6,7 +6,7 @@
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
 # 参数说明:
 #   -u : 用户名 (用于运行服务和登录WebUI)
-#   -p : 密码（必须 ≥ 8 位）
+#   -p : 密码（必须 ≥ 12 位）
 #   -c : qBittorrent 缓存大小 (MiB, 仅4.x有效, 5.x使用mmap)
 #   -q : qBittorrent 版本 (4, 4.3.9, 5, 5.0.4, latest, 或精确小版本如 5.1.2)
 #   -v : 安装 Vertex
@@ -115,8 +115,8 @@ check_root() {
 }
 
 validate_pass() {
-    if [[ ${#1} -lt 8 ]]; then
-        log_err "安全性不足：密码长度必须 ≥ 8 位！"
+    if [[ ${#1} -lt 12 ]]; then
+        log_err "安全性不足：密码长度必须 ≥ 12 位！"
     fi
 }
 
@@ -1027,7 +1027,13 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
+        
+        # CSRF 防护核心：注入完整的代理溯源头部
         proxy_set_header Host \$http_host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        
         proxy_set_header Accept-Encoding "";
         
         sub_filter '</body>' '<script src="/asp-mediainfo.js"></script></body>';
@@ -1052,7 +1058,7 @@ EOF_NGINX
 
         execute_with_spinner "拉取 FileBrowser 镜像" docker pull filebrowser/filebrowser:latest
 
-        # 【终极防弹机制】：挂载目录而非单文件，且在主程序启动前完成所有的数据库初始化和账号注入！
+        # 【终极防弹机制】：明确指定 -d /database/filebrowser.db，并加上 --user 0:0 提权，防止宿主挂载目录权限丢失
         execute_with_spinner "初始化 FileBrowser 数据库表" sh -c "docker run --rm --user 0:0 -v \"$HB/filebrowser_data\":/database filebrowser/filebrowser:latest -d /database/filebrowser.db config init >/dev/null 2>&1 || true"
         
         execute_with_spinner "注入 FileBrowser 管理员账户" sh -c "docker run --rm --user 0:0 -v \"$HB/filebrowser_data\":/database filebrowser/filebrowser:latest -d /database/filebrowser.db users add \"$APP_USER\" \"$APP_PASS\" --perm.admin >/dev/null 2>&1 || true"
@@ -1100,7 +1106,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}        ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.5 ✦${NC}"
+echo -e "${PURPLE}        ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.6 ✦${NC}"
 echo -e "${PURPLE}        ✦              作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
@@ -1184,9 +1190,9 @@ if [[ -n "$APP_PASS" ]]; then validate_pass "$APP_PASS"; fi
 
 if [[ -z "$APP_PASS" ]]; then
     while true; do
-        echo -n -e "  ▶ 请输入 Web 面板统一密码 (必须 ≥ 8 位): "
+        echo -n -e "  ▶ 请输入 Web 面板统一密码 (必须 ≥ 12 位): "
         read -s APP_PASS < /dev/tty; echo ""
-        if [[ ${#APP_PASS} -ge 8 ]]; then break; fi
+        if [[ ${#APP_PASS} -ge 12 ]]; then break; fi
         log_warn "密码过短，请重新输入！"
     done
     echo ""
