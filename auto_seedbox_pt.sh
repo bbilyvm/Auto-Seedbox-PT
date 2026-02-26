@@ -36,6 +36,7 @@ VX_PORT=3000
 FB_PORT=8081
 MI_PORT=8082
 
+
 APP_USER="admin"
 APP_PASS=""
 QB_CACHE=1024
@@ -1100,7 +1101,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.2 ✦${NC}"
+echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.3 ✦${NC}"
 echo -e "${PURPLE}           ✦             作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
@@ -1204,6 +1205,13 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
     # MI_PORT 不再对外暴露，仅用于 Nginx 内部通信映射，因此不再要求用户手动输入
 fi
+
+# ================= 新增端口探测逻辑 =================
+# 自动探测并分配一个空闲的内部端口给 MediaInfo API
+while check_port_occupied "$MI_PORT"; do
+    MI_PORT=$((MI_PORT + 1))
+done
+# =================================================
 
 cat > "$ASP_ENV_FILE" << EOF
 export QB_WEB_PORT=$QB_WEB_PORT
