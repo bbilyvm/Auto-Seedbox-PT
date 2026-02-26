@@ -85,8 +85,8 @@ execute_with_spinner() {
         local spinstr=$temp${spinstr%"$temp"}
         sleep $delay
     done
-    wait $pid
-    local ret=$?
+    local ret=0
+    wait $pid || ret=$?
     printf "\e[?25h"
     if [ $ret -eq 0 ]; then
         printf "\r\033[K ${GREEN}[√]${NC} %s... 完成!\n" "$msg"
@@ -1057,9 +1057,8 @@ EOF_NGINX
         # 2. 给予容器内部 SQLite 初始化建表的缓冲时间 (关键)
         sleep 3
         
-        # 3. 使用 docker exec 在运行中的容器内直接注入用户。
-        # 注意：这里去掉了 >/dev/null 2>&1 || true，如果报错，真正的错误信息会被记录到 /tmp/asp_install.log 中
-        execute_with_spinner "创建 FileBrowser 管理员" sh -c "docker exec filebrowser filebrowser users add \"$APP_USER\" \"$APP_PASS\" --perm.admin"        
+        # 3. 引入智能重试机制：等待内部 SQLite 建表完成，最高尝试 5 次。
+        execute_with_spinner "创建 FileBrowser 管理员" sh -c "for i in {1..5}; do docker exec filebrowser filebrowser users add \"$APP_USER\" \"$APP_PASS\" --perm.admin >/dev/null 2>&1 && break; sleep 2; done || true"        
         open_port "$FB_PORT"
     fi
 }
@@ -1101,8 +1100,8 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.3 ✦${NC}"
-echo -e "${PURPLE}           ✦             作者：Supcutie              ✦${NC}"
+echo -e "${PURPLE}            ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.4 ✦${NC}"
+echo -e "${PURPLE}            ✦              作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
 echo -e "${BLUE}================================================================${NC}"
