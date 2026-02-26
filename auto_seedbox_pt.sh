@@ -925,10 +925,12 @@ EOF
             execute_with_spinner "安装 Nginx 底层代理引擎" sh -c "apt-get update -qq && apt-get install -y nginx"
         fi
 
+        # 引入你存放于 GitHub 的完美重构版 JS 代码
         JS_REMOTE_URL="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/asp-mediainfo.js"
         execute_with_spinner "拉取 MediaInfo 极客前端扩展" wget -qO /usr/local/bin/asp-mediainfo.js "$JS_REMOTE_URL"
         execute_with_spinner "拉取弹窗 UI 依赖库" wget -qO /usr/local/bin/sweetalert2.all.min.js "https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"
 
+        # 带有智能降级 JSON 重组引擎的 Python 微服务
         cat > /usr/local/bin/asp-mediainfo.py << 'EOF_PY'
 import http.server, socketserver, urllib.parse, subprocess, json, os, sys
 PORT = int(sys.argv[2])
@@ -941,15 +943,47 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             file_path = query.get('file', [''])[0].lstrip('/')
             full_path = os.path.abspath(os.path.join(BASE_DIR, file_path))
+            
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
+            
             if not full_path.startswith(os.path.abspath(BASE_DIR)) or not os.path.isfile(full_path):
-                self.wfile.write(json.dumps({"error": "非法路径"}).encode('utf-8'))
+                self.wfile.write(json.dumps({"error": "非法路径或文件不存在"}).encode('utf-8'))
                 return
+                
             try:
+                # 优先尝试原生 JSON 输出 (需要较新的 mediainfo 版本)
                 res = subprocess.run(['mediainfo', '--Output=JSON', full_path], capture_output=True, text=True)
-                self.wfile.write(res.stdout.encode('utf-8'))
+                try:
+                    json.loads(res.stdout)
+                    self.wfile.write(res.stdout.encode('utf-8'))
+                    return
+                except:
+                    pass
+                
+                # 如果旧系统不支持 JSON 导出指令，则捕获原始文本，并智能转换拼接成 JSON
+                res_text = subprocess.run(['mediainfo', full_path], capture_output=True, text=True)
+                lines = res_text.stdout.split('\n')
+                tracks = []
+                current_track = {}
+                for line in lines:
+                    line = line.strip()
+                    if not line:
+                        if current_track:
+                            tracks.append(current_track)
+                            current_track = {}
+                        continue
+                    if ':' not in line and '@type' not in current_track:
+                        current_track['@type'] = line
+                    elif ':' in line:
+                        k, v = line.split(':', 1)
+                        current_track[k.strip()] = v.strip()
+                if current_track:
+                    tracks.append(current_track)
+                
+                self.wfile.write(json.dumps({"media": {"track": tracks}}).encode('utf-8'))
+                
             except Exception as e:
                 self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
         else:
@@ -977,6 +1011,7 @@ EOF
         systemctl daemon-reload && systemctl enable asp-mediainfo.service >/dev/null 2>&1
         systemctl restart asp-mediainfo.service
 
+        # 零侵入安全的 Nginx 代理与 HTML 劫持
         cat > /etc/nginx/conf.d/asp-filebrowser.conf << EOF_NGINX
 server {
     listen $FB_PORT;
@@ -1061,7 +1096,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.0 ✦${NC}"
+echo -e "${PURPLE}           ✦ Auto-Seedbox-PT (ASP) 极速部署引擎 v2.3.1 ✦${NC}"
 echo -e "${PURPLE}           ✦             作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
@@ -1163,7 +1198,7 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     QB_WEB_PORT=$(get_input_port "qBit WebUI" 8080); QB_BT_PORT=$(get_input_port "qBit BT监听" 20000)
     [[ "$DO_VX" == "true" ]] && VX_PORT=$(get_input_port "Vertex" 3000)
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
-    [[ "$DO_FB" == "true" ]] && MI_PORT=$(get_input_port "MediaInfo API(内部防冲突)" 8082)
+    # MI_PORT 不再对外暴露，仅用于 Nginx 内部通信映射，因此不再要求用户手动输入
 fi
 
 cat > "$ASP_ENV_FILE" << EOF
@@ -1213,7 +1248,7 @@ echo -e "     └─ 内部直连 qBit  : ${YELLOW}$VX_GW:$QB_WEB_PORT${NC}"
 fi
 if [[ "$DO_FB" == "true" ]]; then
 echo -e "  📁 FileBrowser 文件  : ${GREEN}http://$PUB_IP:$FB_PORT${NC}"
-echo -e "     └─ MediaInfo 扩展 : ${YELLOW}已由本地 Nginx 安全代理转发${NC}"
+echo -e "     └─ MediaInfo 扩展 : ${YELLOW}已由本地 Nginx 安全代理分发${NC}"
 fi
 
 echo ""
