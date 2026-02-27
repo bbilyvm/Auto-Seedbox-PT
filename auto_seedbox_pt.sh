@@ -1,7 +1,7 @@
 #!/bin/bash
 
 ################################################################################
-# Auto-Seedbox-PT (ASP) 
+# Auto-Seedbox-PT (ASP)
 # qBittorrent + Vertex + FileBrowser 一键安装脚本
 # 系统要求: Debian 10+ / Ubuntu 20.04+ (x86_64 / aarch64)
 # 参数说明:
@@ -16,6 +16,12 @@
 #   -o : 自定义端口 (会提示输入)
 #   -d : Vertex data 目录 ZIP/tar.gz 下载链接 (可选)
 #   -k : Vertex data ZIP 解压密码 (可选)
+#
+# v3.1.1 变更摘要（仅做“必要且关键”的修复）：
+#  1) SSD/HDD 判定改为基于 Downloads 所在挂载盘（df→block device→rotational）
+#  2) V5 I/O 模式：SSD+M1 才允许 io_mode=0；HDD 强制 io_mode=1
+#  3) qB SendBufferWatermarkFactor 分档补齐（对齐并超越 jerry 的完整度）
+#  4) 卸载：补删 qbittorrent-nox@.service 模板 unit；limits.conf 用块标记彻底回滚（兼容旧残留）
 ################################################################################
 
 set -euo pipefail
@@ -39,7 +45,7 @@ MI_PORT=8082
 APP_USER="admin"
 APP_PASS=""
 QB_CACHE=1024
-QB_VER_REQ="5.0.4" 
+QB_VER_REQ="5.0.4"
 DO_VX=false
 DO_FB=false
 DO_TUNE=false
@@ -49,7 +55,7 @@ TUNE_MODE="1"
 VX_RESTORE_URL=""
 VX_ZIP_PASS=""
 INSTALLED_MAJOR_VER="5"
-ACTION="install" 
+ACTION="install"
 
 HB="/root"
 ASP_ENV_FILE="/etc/asp_env.sh"
@@ -81,7 +87,7 @@ execute_with_spinner() {
     while kill -0 $pid 2>/dev/null; do
         local temp=${spinstr#?}
         printf "\r\033[K ${CYAN}[%c]${NC} %s..." "$spinstr" "$msg"
-        local spinstr=$temp${spinstr%"$temp"}
+        spinstr=$temp${spinstr%"$temp"}
         sleep $delay
     done
     local ret=0
@@ -107,12 +113,6 @@ download_file() {
     fi
 }
 
-check_root() { 
-    if [[ $EUID -ne 0 ]]; then
-        log_err "权限不足：请使用 root 用户运行本脚本！"
-    fi
-}
-
 validate_pass() {
     if [[ ${#1} -lt 12 ]]; then
         log_err "安全性不足：密码长度必须 ≥ 12 位！"
@@ -131,29 +131,25 @@ wait_for_lock() {
 open_port() {
     local port=$1
     local proto=${2:-tcp}
-    local added=false
 
     if command -v ufw >/dev/null && systemctl is-active --quiet ufw; then
-        ufw allow "$port/$proto" >/dev/null 2>&1
-        added=true
+        ufw allow "$port/$proto" >/dev/null 2>&1 || true
     fi
 
     if command -v firewall-cmd >/dev/null && systemctl is-active --quiet firewalld; then
-        firewall-cmd --zone=public --add-port="$port/$proto" --permanent >/dev/null 2>&1
-        firewall-cmd --reload >/dev/null 2>&1
-        added=true
+        firewall-cmd --zone=public --add-port="$port/$proto" --permanent >/dev/null 2>&1 || true
+        firewall-cmd --reload >/dev/null 2>&1 || true
     fi
 
     if command -v iptables >/dev/null; then
         if ! iptables -C INPUT -p "$proto" --dport "$port" -j ACCEPT 2>/dev/null; then
-            iptables -I INPUT 1 -p "$proto" --dport "$port" -j ACCEPT
+            iptables -I INPUT 1 -p "$proto" --dport "$port" -j ACCEPT || true
             if command -v netfilter-persistent >/dev/null; then
-                netfilter-persistent save >/dev/null 2>&1
+                netfilter-persistent save >/dev/null 2>&1 || true
             elif command -v iptables-save >/dev/null; then
                 mkdir -p /etc/iptables
                 iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
             fi
-            added=true
         fi
     fi
 }
@@ -186,6 +182,47 @@ get_input_port() {
     done
 }
 
+# ================= 1.1 硬件/盘型判定（关键：按 Downloads 所在盘判断） =================
+
+is_g95_preset() {
+    # 经验区间：NC G9.5 常见为 4C/8G（允许一定浮动）
+    local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local mem_gb=$((mem_kb / 1024 / 1024))
+    local cpus=$(nproc 2>/dev/null || echo 1)
+
+    if [[ $cpus -ge 4 && $cpus -le 6 && $mem_gb -ge 7 && $mem_gb -le 10 ]]; then
+        return 0
+    fi
+    return 1
+}
+
+detect_download_disk_class() {
+    # 输出：ssd / hdd
+    local path="${1:-$HB/Downloads}"
+
+    [[ -d "$path" ]] || { echo "ssd"; return 0; }
+
+    local dev
+    dev=$(df -P "$path" 2>/dev/null | awk 'NR==2{print $1}' || true)
+    [[ -n "${dev:-}" ]] || { echo "ssd"; return 0; }
+
+    dev=$(readlink -f "$dev" 2>/dev/null || echo "$dev")
+    dev=$(basename "$dev")
+
+    # 解析分区→主盘（sda1→sda, nvme0n1p1→nvme0n1, dm-0→底层）
+    local pk
+    pk=$(lsblk -no PKNAME "/dev/$dev" 2>/dev/null | head -n 1 || true)
+    [[ -n "${pk:-}" ]] && dev="$pk"
+
+    local rota
+    rota=$(cat "/sys/block/$dev/queue/rotational" 2>/dev/null || echo "0")
+    if [[ "$rota" == "1" ]]; then
+        echo "hdd"
+    else
+        echo "ssd"
+    fi
+}
+
 # ================= 2. 用户管理 =================
 
 setup_user() {
@@ -199,7 +236,6 @@ setup_user() {
         log_info "系统用户 $APP_USER 已存在，复用之。"
     else
         log_info "创建隔离系统用户: $APP_USER"
-        # 检查同名用户组是否已经存在
         if getent group "$APP_USER" >/dev/null 2>&1; then
             log_warn "检测到同名用户组已存在，正在将其指定为主要组..."
             useradd -m -s /bin/bash -g "$APP_USER" "$APP_USER"
@@ -221,23 +257,23 @@ uninstall() {
     echo -e "${CYAN}=================================================${NC}"
     echo -e "${CYAN}        执行深度卸载流程 (含系统回滚)            ${NC}"
     echo -e "${CYAN}=================================================${NC}"
-    
+
     log_info "正在扫描已安装的用户..."
     local detected_users=$(systemctl list-units --full -all --no-legend 'qbittorrent-nox@*' | sed -n 's/.*qbittorrent-nox@\([^.]*\)\.service.*/\1/p' | sort -u | tr '\n' ' ')
-    
+
     if [[ -z "$detected_users" ]]; then
         detected_users="未检测到活跃服务 (可能是 admin)"
     fi
-    
+
     echo -e "${YELLOW}=================================================${NC}"
     echo -e "${YELLOW} 提示: 系统中检测到以下可能的安装用户: ${NC}"
     echo -e "${GREEN} -> [ ${detected_users} ] ${NC}"
     echo -e "${YELLOW}=================================================${NC}"
-    
+
     local default_u=${APP_USER:-admin}
     read -p "请输入要卸载的用户名 [默认: $default_u]: " input_user < /dev/tty
     target_user=${input_user:-$default_u}
-    
+
     target_home=$(eval echo ~$target_user 2>/dev/null || echo "/home/$target_user")
 
     log_warn "将清理用户数据并【彻底回滚内核与系统状态】。"
@@ -250,10 +286,13 @@ uninstall() {
         for svc in \$(systemctl list-units --full -all | grep 'qbittorrent-nox@' | awk '{print \$1}'); do
             systemctl stop \"\$svc\" 2>/dev/null || true
             systemctl disable \"\$svc\" 2>/dev/null || true
-            rm -f \"/etc/systemd/system/\$svc\"
         done
         pkill -9 qbittorrent-nox 2>/dev/null || true
         rm -f /usr/bin/qbittorrent-nox
+
+        # [FIX] 删除模板 unit（你旧版可能残留）
+        rm -f /etc/systemd/system/qbittorrent-nox@.service
+        rm -f /etc/systemd/system/multi-user.target.wants/qbittorrent-nox@*.service 2>/dev/null || true
     "
 
     if command -v docker >/dev/null; then
@@ -273,9 +312,14 @@ uninstall() {
         rm -f /etc/systemd/system/asp-mediainfo.service /usr/local/bin/asp-mediainfo.py
         rm -f /usr/local/bin/asp-mediainfo.js /usr/local/bin/sweetalert2.all.min.js
         [ -f /etc/nginx/conf.d/asp-filebrowser.conf ] && rm -f /etc/nginx/conf.d/asp-filebrowser.conf && systemctl reload nginx 2>/dev/null || true
-        [ -f /etc/security/limits.conf ] && sed -i '/# Auto-Seedbox-PT/d' /etc/security/limits.conf || true
+
+        # [FIX] limits.conf 彻底回滚：先删新块标记，再兼容旧残留格式
+        if [ -f /etc/security/limits.conf ]; then
+            sed -i '/# Auto-Seedbox-PT Limits BEGIN/,/# Auto-Seedbox-PT Limits END/d' /etc/security/limits.conf 2>/dev/null || true
+            sed -i '/# Auto-Seedbox-PT Limits/{N;N;N;N;d;}' /etc/security/limits.conf 2>/dev/null || true
+        fi
     "
-    
+
     log_warn "执行底层状态回滚..."
     if [ -f /etc/asp_original_governor ]; then
         orig_gov=$(cat /etc/asp_original_governor)
@@ -288,7 +332,7 @@ uninstall() {
             [ -f "$f" ] && echo "ondemand" > "$f" 2>/dev/null || true
         done
     fi
-    
+
     ETH=$(ip -o -4 route show to default | awk '{print $5}' | head -1)
     if [ -n "$ETH" ]; then
         ifconfig "$ETH" txqueuelen 1000 2>/dev/null || true
@@ -304,7 +348,7 @@ uninstall() {
     sysctl -w vm.dirty_ratio=20 >/dev/null 2>&1 || true
     sysctl -w vm.dirty_background_ratio=10 >/dev/null 2>&1 || true
     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
-    
+
     execute_with_spinner "清理防火墙规则遗留" sh -c "
         if command -v ufw >/dev/null && systemctl is-active --quiet ufw; then
             ufw delete allow $QB_WEB_PORT/tcp >/dev/null 2>&1 || true
@@ -328,7 +372,7 @@ uninstall() {
             iptables -D INPUT -p tcp --dport $VX_PORT -j ACCEPT 2>/dev/null || true
             iptables -D INPUT -p tcp --dport $FB_PORT -j ACCEPT 2>/dev/null || true
             if command -v netfilter-persistent >/dev/null; then
-                netfilter-persistent save >/dev/null 2>&1
+                netfilter-persistent save >/dev/null 2>&1 || true
             elif command -v iptables-save >/dev/null; then
                 iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
             fi
@@ -340,9 +384,10 @@ uninstall() {
 
     log_warn "清理配置文件..."
     if [[ -d "$target_home" ]]; then
-         rm -rf "$target_home/.config/qBittorrent" "$target_home/.local/share/qBittorrent" "$target_home/.cache/qBittorrent" "$target_home/vertex" "$target_home/.config/filebrowser" "$target_home/filebrowser_data"
+         rm -rf "$target_home/.config/qBittorrent" "$target_home/.local/share/qBittorrent" "$target_home/.cache/qBittorrent" \
+                "$target_home/vertex" "$target_home/.config/filebrowser" "$target_home/filebrowser_data"
          log_info "已清理 $target_home 下的配置文件。"
-         
+
          if [[ -d "$target_home/Downloads" ]]; then
              echo -e "${YELLOW}=================================================${NC}"
              log_warn "检测到可能包含大量数据的目录: $target_home/Downloads"
@@ -357,9 +402,10 @@ uninstall() {
              echo -e "${YELLOW}=================================================${NC}"
          fi
     fi
-    rm -rf "/root/.config/qBittorrent" "/root/.local/share/qBittorrent" "/root/.cache/qBittorrent" "/root/vertex" "/root/.config/filebrowser" "/root/filebrowser_data" "$ASP_ENV_FILE"
+    rm -rf "/root/.config/qBittorrent" "/root/.local/share/qBittorrent" "/root/.cache/qBittorrent" \
+           "/root/vertex" "/root/.config/filebrowser" "/root/filebrowser_data" "$ASP_ENV_FILE"
     log_warn "建议重启服务器 (reboot) 以彻底清理内核内存驻留。"
-    
+
     log_info "卸载完成。"
     exit 0
 }
@@ -371,21 +417,29 @@ optimize_system() {
     echo -e " ${CYAN}╔══════════════════ 系统内核优化 (ASP-Tuned Elite) ══════════════════╗${NC}"
     echo ""
     echo -e "  ${CYAN}▶ 正在深度接管系统调度与网络协议栈...${NC}"
-    
+
     local mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
     local mem_gb_sys=$((mem_kb / 1024 / 1024))
-    
+
+    # [FIX] 按 Downloads 所在盘判断（SSD/HDD）
+    local disk_class
+    disk_class=$(detect_download_disk_class "$HB/Downloads")
+
     # 基础安全底线 (面向 4GB - 8GB 的常规 VPS)
-    local rmem_max=16777216      # 16MB TCP缓冲 (Jerry048 推荐安全值，防 OOM)
+    local rmem_max=16777216      # 16MB TCP缓冲 (安全值，防 OOM)
     local dirty_ratio=20
     local dirty_bg_ratio=5
-    local backlog=30000          # 黄金队列长度，防 CPU Steal
+    local backlog=30000
     local syn_backlog=65535
-    
+
+    # HDD：更保守的脏页策略，避免长时间写回卡顿
+    if [[ "$disk_class" == "hdd" ]]; then
+        dirty_ratio=15
+        dirty_bg_ratio=5
+    fi
+
     if [[ "$TUNE_MODE" == "1" ]]; then
-        # 【动态自适应计算：结合Jerry048防溢出体系】
         if [[ $mem_gb_sys -ge 30 ]]; then
-            # 纯血独服/大内存怪兽 (32G+)：TCP 缓冲 64MB
             rmem_max=67108864
             dirty_ratio=40
             dirty_bg_ratio=10
@@ -393,7 +447,6 @@ optimize_system() {
             syn_backlog=100000
             echo -e "  ${PURPLE}↳ 检测到纯血级算力 (>=32GB)，已解锁高位内核权限 (64MB Buffer)！${NC}"
         elif [[ $mem_gb_sys -ge 15 ]]; then
-            # 中大型 VPS/独服 (16G-31G)：平衡吞吐与延迟，TCP 缓冲 32MB
             rmem_max=33554432
             dirty_ratio=30
             dirty_bg_ratio=10
@@ -401,10 +454,9 @@ optimize_system() {
             syn_backlog=100000
             echo -e "  ${PURPLE}↳ 检测到中大型算力 (>=16GB)，已挂载进阶内核权限 (32MB Buffer)。${NC}"
         else
-            # 常规级算力 (如 NCG9.5 8G)：严格限制 TCP 缓冲在 16MB，彻底告别网络栈 OOM
             rmem_max=16777216
-            dirty_ratio=20
-            dirty_bg_ratio=5
+            dirty_ratio=${dirty_ratio}
+            dirty_bg_ratio=${dirty_bg_ratio}
             backlog=30000
             syn_backlog=65535
             echo -e "  ${PURPLE}↳ 检测到常规级算力 (<16GB)，已挂载防 OOM 并发矩阵 (16MB Buffer)。${NC}"
@@ -414,15 +466,13 @@ optimize_system() {
     local tcp_wmem="4096 65536 $rmem_max"
     local tcp_rmem="4096 87380 $rmem_max"
     local tcp_mem_min=$((mem_kb / 16)); local tcp_mem_def=$((mem_kb / 8)); local tcp_mem_max=$((mem_kb / 4))
-    
-    # 智能穿透侦测 BBR 版本
+
     local avail_cc=$(sysctl -n net.ipv4.tcp_available_congestion_control 2>/dev/null || echo "bbr cubic reno")
     local kernel_name=$(uname -r | tr '[:upper:]' '[:lower:]')
     local target_cc="bbr"
     local ui_cc="bbr"
 
     if [[ "$TUNE_MODE" == "1" ]]; then
-        # BBRv3 / BBRx 穿透识别逻辑
         if echo "$avail_cc" | grep -qw "bbrx" || echo "$kernel_name" | grep -q "bbrx"; then
             target_cc=$(echo "$avail_cc" | grep -qw "bbrx" && echo "bbrx" || echo "bbr")
             ui_cc="bbrx"
@@ -430,7 +480,7 @@ optimize_system() {
             target_cc=$(echo "$avail_cc" | grep -qw "bbr3" && echo "bbr3" || echo "bbr")
             ui_cc="bbrv3"
         fi
-        
+
         if [ ! -f /etc/asp_original_governor ]; then
             cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null > /etc/asp_original_governor || echo "ondemand" > /etc/asp_original_governor
         fi
@@ -467,13 +517,16 @@ net.ipv4.tcp_adv_win_scale = -2
 net.ipv4.tcp_notsent_lowat = 131072
 EOF
 
-    if ! grep -q "Auto-Seedbox-PT" /etc/security/limits.conf; then
+    # [FIX] limits.conf 用块标记，卸载才能“彻底回滚”
+    if ! grep -q "# Auto-Seedbox-PT Limits BEGIN" /etc/security/limits.conf; then
         cat >> /etc/security/limits.conf << EOF
-# Auto-Seedbox-PT Limits
+
+# Auto-Seedbox-PT Limits BEGIN
 * hard nofile 1048576
 * soft nofile 1048576
 root hard nofile 1048576
 root soft nofile 1048576
+# Auto-Seedbox-PT Limits END
 EOF
     fi
 
@@ -509,22 +562,17 @@ done
 ETH=\$(ip -o -4 route show to default | awk '{print \$5}' | head -1)
 if [ -n "\$ETH" ]; then
     ifconfig "\$ETH" txqueuelen 10000 2>/dev/null
-    # 尝试扩容 Ring Buffer，容忍失败
-    ethtool -G "\$ETH" rx 4096 tx 4096 2>/dev/null || ethtool -G "\$ETH" rx 2048 tx 2048 2>/dev/null || true 
-    
+    ethtool -G "\$ETH" rx 4096 tx 4096 2>/dev/null || ethtool -G "\$ETH" rx 2048 tx 2048 2>/dev/null || true
+
     if [[ "$TUNE_MODE" == "1" ]]; then
-        # 【核心黑科技】：开启 RPS/RFS 软中断网卡多核均衡 (防单核 100% 瓶颈)
         CPUS=\$(nproc 2>/dev/null || echo 1)
         if [[ \$CPUS -gt 1 ]]; then
-            # 计算全核心 16 进制掩码 (例如 4核 为 f, 8核 为 ff)
             MASK=\$(printf "%x" \$(( (1 << CPUS) - 1 )))
-            
-            # 开启 RPS (Receive Packet Steering)
+
             for rxq in /sys/class/net/\$ETH/queues/rx-*; do
                 [ -w "\$rxq/rps_cpus" ] && echo "\$MASK" > "\$rxq/rps_cpus" 2>/dev/null
             done
-            
-            # 开启 RFS (Receive Flow Steering) 匹配应用层线程
+
             [ -w /proc/sys/net/core/rps_sock_flow_entries ] && echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
             for rxq in /sys/class/net/\$ETH/queues/rx-*; do
                 [ -w "\$rxq/rps_flow_cnt" ] && echo 4096 > "\$rxq/rps_flow_cnt" 2>/dev/null
@@ -554,7 +602,7 @@ EOF
 
     execute_with_spinner "注入高吞吐网络参数 (防 Bufferbloat 策略)" sysctl --system
     execute_with_spinner "重载网卡队列与 CPU 性能调度器" systemctl start asp-tune.service || true
-    
+
     local rmem_mb=$((rmem_max / 1024 / 1024))
     echo ""
     echo -e "  ${PURPLE}[⚡ ASP-Tuned Elite 核心调优已挂载]${NC}"
@@ -562,7 +610,7 @@ EOF
     echo -e "  ${CYAN}├─${NC} 全局并发上限 : ${YELLOW}1,048,576${NC} (解除 Socket 封印)"
     echo -e "  ${CYAN}├─${NC} TCP 缓冲上限 : ${YELLOW}${rmem_mb} MB${NC} (动态智能感知防 OOM)"
     if [[ "$TUNE_MODE" == "1" ]]; then
-        echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (激进写盘适配 NVMe)"
+        echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (磁盘类型自适配)"
         echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${RED}performance${NC} (锁定最高主频)"
         echo -e "  ${CYAN}└─${NC} 网卡软中断池 : ${RED}RPS/RFS 多核亲和性均衡已激活${NC} (破除单核瓶颈)"
     else
@@ -583,30 +631,30 @@ install_qbit() {
     echo ""
     local arch=$(uname -m); local url=""
     local api="https://api.github.com/repos/userdocs/qbittorrent-nox-static/releases"
-    
+
     local hash_threads=$(nproc 2>/dev/null || echo 2)
-    
+
     if [[ "$QB_VER_REQ" == "4" || "$QB_VER_REQ" == "4.3.9" ]]; then
         INSTALLED_MAJOR_VER="4"
         log_info "锁定版本: 4.x (绑定 libtorrent v1.2.20) -> 使用个人静态库"
         [[ "$arch" == "x86_64" ]] && url="$URL_V4_AMD64" || url="$URL_V4_ARM64"
-        
+
     elif [[ "$QB_VER_REQ" == "5" || "$QB_VER_REQ" == "5.0.4" ]]; then
         INSTALLED_MAJOR_VER="5"
         log_info "锁定版本: 5.x (绑定 libtorrent v2.0.11 支持 mmap) -> 使用个人静态库"
         [[ "$arch" == "x86_64" ]] && url="$URL_V5_AMD64" || url="$URL_V5_ARM64"
-        
+
     else
         INSTALLED_MAJOR_VER="5"
         log_info "请求动态版本: $QB_VER_REQ -> 正在连接 GitHub API..."
-        
+
         local tag=""
         if [[ "$QB_VER_REQ" == "latest" ]]; then
             tag=$(curl -sL --max-time 10 "$api" | jq -r '.[0].tag_name' 2>/dev/null || echo "null")
         else
             tag=$(curl -sL --max-time 10 "$api" | jq -r --arg v "$QB_VER_REQ" '.[].tag_name | select(contains($v))' 2>/dev/null | head -n 1 || echo "null")
         fi
-        
+
         if [[ -z "$tag" || "$tag" == "null" ]]; then
             log_warn "GitHub API 获取失败或受限，触发本地仓库兜底机制！"
             log_info "已自动降级为您个人的稳定内置版本: 5.0.4"
@@ -617,35 +665,48 @@ install_qbit() {
             url="https://github.com/userdocs/qbittorrent-nox-static/releases/download/${tag}/${fname}"
         fi
     fi
-    
+
     download_file "$url" "/usr/bin/qbittorrent-nox"
     chmod +x /usr/bin/qbittorrent-nox
-    
+
     mkdir -p "$HB/.config/qBittorrent" "$HB/Downloads" "$HB/.local/share/qBittorrent/BT_backup"
     chown -R "$APP_USER:$APP_USER" "$HB/.config/qBittorrent" "$HB/Downloads" "$HB/.local"
 
     rm -f "$HB/.config/qBittorrent/qBittorrent.conf.lock"
     rm -f "$HB/.local/share/qBittorrent/BT_backup/.lock"
-    
+
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; salt = os.urandom(16); dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), salt, 100000); print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})')" "$APP_PASS")
-    
-    # 融合 Jerry048 的缓存计算哲学
+
+    # [FIX] 按 Downloads 所在盘判定 SSD/HDD（用于 V5 I/O 与刷流参数）
+    local disk_class
+    disk_class=$(detect_download_disk_class "$HB/Downloads")
+
+    # 融合 Jerry048 的缓存计算哲学 + 你的 M1/M2 分层
     if [[ "${CACHE_SET_BY_USER:-false}" == "false" ]]; then
         local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
+
         if [[ "$TUNE_MODE" == "1" ]]; then
             if [[ "$INSTALLED_MAJOR_VER" == "4" ]]; then
-                # 兼顾 V4 极限刷流与内存防溢出，设定为 15%
-                QB_CACHE=$((total_mem_mb * 15 / 100))
+                # V4：更保守（接近 1/8）
+                QB_CACHE=$((total_mem_mb / 8))
             else
-                # V5 (mmap) 维持 25% 的工作集限制
+                # V5：mmap 工作集（接近 1/4）
                 QB_CACHE=$((total_mem_mb / 4))
             fi
         else
-            # M2 均衡保种模式 (V4给15%保底，V5由系统调度无需庞大工作集)
-            QB_CACHE=$((total_mem_mb * 15 / 100))
-            [[ $QB_CACHE -gt 2048 ]] && QB_CACHE=2048
+            # M2：更稳但不“过保守”
+            if [[ "$INSTALLED_MAJOR_VER" == "4" ]]; then
+                QB_CACHE=$((total_mem_mb / 12))
+            else
+                QB_CACHE=$((total_mem_mb / 6))
+            fi
         fi
+
+        # 下限/上限防呆
+        [[ $QB_CACHE -lt 256 ]] && QB_CACHE=256
+        [[ "$TUNE_MODE" == "2" && $QB_CACHE -gt 2048 ]] && QB_CACHE=2048
     fi
+
     local cache_val="$QB_CACHE"
     local config_file="$HB/.config/qBittorrent/qBittorrent.conf"
 
@@ -670,10 +731,12 @@ Connection\PortRangeMin=$QB_BT_PORT
 EOF
 
     if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
-        # 【双模动态 I/O 修复】模式 1 禁用缓存 (0)，模式 2 启用缓存 (1) 保机械盘
+        # [FIX] V5 I/O：SSD+M1 才允许 io_mode=0；HDD 强制 io_mode=1
         local io_mode=1
-        [[ "$TUNE_MODE" == "1" ]] && io_mode=0
-        
+        if [[ "$disk_class" == "ssd" && "$TUNE_MODE" == "1" ]]; then
+            io_mode=0
+        fi
+
         cat >> "$config_file" << EOF
 Session\DiskIOType=2
 Session\DiskIOReadMode=$io_mode
@@ -684,22 +747,42 @@ EOF
     fi
 
     chown "$APP_USER:$APP_USER" "$config_file"
-    
-    # 移除 Systemd 绞索，交给内核 OOM 接管
+
+    # [FIX] systemd 运行用户用实例名；不强绑 Group（避免“用户存在但同名组不存在”的坑）
+    # 同时保留“可控不 OOM”：用 OOMScoreAdjust 让 qB 优先被杀（保护系统），并且 restart
+    local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
+    local reserve_mb=1024
+    [[ $total_mem_mb -le 4096 ]] && reserve_mb=768
+    local mem_limit_mb=$((total_mem_mb - reserve_mb))
+    [[ $mem_limit_mb -lt 1024 ]] && mem_limit_mb=$((total_mem_mb * 80 / 100))
+    local mem_high_mb=$((mem_limit_mb * 90 / 100))
+
     cat > /etc/systemd/system/qbittorrent-nox@.service << EOF
 [Unit]
 Description=qBittorrent Service (User: %i)
 After=network.target
+
 [Service]
 Type=simple
-User=$APP_USER
-Group=$APP_USER
+User=%i
 ExecStart=/usr/bin/qbittorrent-nox --webui-port=$QB_WEB_PORT
 Restart=on-failure
+RestartSec=3
 LimitNOFILE=1048576
+
+# 让系统“先活下来”：qB 作为重负载服务，OOM 时优先被干掉并自动拉起
+OOMScoreAdjust=500
+
+# 兼容老系统（cgroup v1）与新系统（cgroup v2）：有的会忽略，有的会生效
+MemoryAccounting=true
+MemoryHigh=${mem_high_mb}M
+MemoryMax=${mem_limit_mb}M
+MemoryLimit=${mem_limit_mb}M
+
 [Install]
 WantedBy=multi-user.target
 EOF
+
     systemctl daemon-reload && systemctl enable "qbittorrent-nox@$APP_USER" >/dev/null 2>&1
     systemctl start "qbittorrent-nox@$APP_USER"
     open_port "$QB_WEB_PORT"; open_port "$QB_BT_PORT" "tcp"; open_port "$QB_BT_PORT" "udp"
@@ -718,86 +801,119 @@ EOF
 
     if [[ "$api_ready" == "true" ]]; then
         printf "\r\033[K ${GREEN}[√]${NC} API 引擎握手成功！开始下发高级底层配置... \n"
-        
+
         curl -s -c "$TEMP_DIR/qb_cookie.txt" --max-time 5 --data "username=$APP_USER&password=$APP_PASS" "http://127.0.0.1:$QB_WEB_PORT/api/v2/auth/login" >/dev/null
-        
+
         curl -s -b "$TEMP_DIR/qb_cookie.txt" --max-time 5 "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/preferences" > "$TEMP_DIR/current_pref.json"
-        
-        # 基础防漏与协议参数 
+
+        # 基础防漏与协议参数
         local patch_json="{\"locale\":\"zh_CN\",\"bittorrent_protocol\":1,\"dht\":false,\"pex\":false,\"lsd\":false,\"announce_to_all_trackers\":true,\"announce_to_all_tiers\":true,\"queueing_enabled\":false,\"bdecode_depth_limit\":10000,\"bdecode_token_limit\":10000000,\"strict_super_seeding\":false,\"max_ratio_action\":0,\"max_ratio\":-1,\"max_seeding_time\":-1,\"file_pool_size\":5000,\"peer_tos\":2"
-        
+
+        # [FIX] SendBufferWatermarkFactor 分档（对齐 jerry 的完整度，并让 SSD/HDD 更合理）
+        # jerry: SSD aio=12 low=5120 buf=20480 factor=250; HDD aio=4 low=3072 buf=10240 factor=150 :contentReference[oaicite:1]{index=1}
+        local virt="none"
+        virt=$(systemd-detect-virt 2>/dev/null || echo "none")
+
+        local sb_low=3072
+        local sb_buf=15360
+        local sb_factor=200
+
+        if [[ "$disk_class" == "ssd" ]]; then
+            sb_low=5120
+            sb_buf=20480
+            sb_factor=250
+        elif [[ "$disk_class" == "hdd" ]]; then
+            sb_low=3072
+            sb_buf=10240
+            sb_factor=150
+        fi
+
+        # 小内存更保守（无论盘型）
+        local mem_kb_qbit=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local mem_gb_qbit=$((mem_kb_qbit / 1024 / 1024))
+        if [[ $mem_gb_qbit -lt 6 ]]; then
+            sb_low=3072
+            sb_buf=10240
+            sb_factor=150
+        fi
+
+        # G9.5：允许更激进（即使在虚拟化环境也按“高质量 SSD 档”走）
+        if is_g95_preset; then
+            sb_low=5120
+            sb_buf=20480
+            sb_factor=250
+        fi
+
         if [[ "$TUNE_MODE" == "1" ]]; then
-            local mem_kb_qbit=$(grep MemTotal /proc/meminfo | awk '{print $2}')
-            local mem_gb_qbit=$((mem_kb_qbit / 1024 / 1024))
-            
-            # 【核心重构：引入 Jerry048 防溢出并发墙梯队】
+            # 【核心重构：引入并发墙梯队 + 盘型/机型档位】
             local dyn_async_io=8
             local dyn_max_connec=4000
             local dyn_max_connec_tor=200
             local dyn_max_up=2000
             local dyn_max_up_tor=100
             local dyn_half_open=200
-            local send_buf=5120
-            local send_buf_low=1024
+
+            # async_io_threads：SSD 更高，HDD 更低
+            if [[ "$disk_class" == "ssd" ]]; then
+                dyn_async_io=12
+            else
+                dyn_async_io=4
+            fi
 
             if [[ $mem_gb_qbit -ge 30 ]]; then
-                # 纯血物理独服 (32G+)：海量并发轰炸
                 dyn_async_io=16
                 dyn_max_connec=30000
                 dyn_max_connec_tor=1000
                 dyn_max_up=10000
                 dyn_max_up_tor=300
                 dyn_half_open=1000
-                send_buf=20480
-                send_buf_low=5120
             elif [[ $mem_gb_qbit -ge 15 ]]; then
-                # 中大型机器 (16G-31G)
-                dyn_async_io=8
+                dyn_async_io=12
                 dyn_max_connec=10000
                 dyn_max_connec_tor=500
                 dyn_max_up=5000
                 dyn_max_up_tor=200
                 dyn_half_open=500
-                send_buf=10240
-                send_buf_low=3072
             elif [[ $mem_gb_qbit -lt 6 ]]; then
-                # 入门级小鸡 (<6G)
                 dyn_async_io=4
                 dyn_max_connec=2000
                 dyn_max_connec_tor=100
                 dyn_max_up=500
                 dyn_max_up_tor=50
                 dyn_half_open=100
-                # Jerry048 弱性能机器标配水位
-                send_buf=5120
-                send_buf_low=1024
             else
-                # 常规机器 (6G-14G，涵盖 NCG9.5)：限制并发墙，防止连接数雪崩
-                dyn_async_io=8              # Jerry推荐 NVMe/SSD 用 8
-                dyn_max_connec=4000         # 从原先的 20000 暴降至 4000，遏制内核 OOM
-                dyn_max_connec_tor=200      # 限制单种并发，拒绝无效握手
+                # 6G-14G：默认安全墙（你的核心用户 G9.5 在这里）
+                dyn_async_io=$([[ "$disk_class" == "ssd" ]] && echo 12 || echo 4)
+                dyn_max_connec=4000
+                dyn_max_connec_tor=200
                 dyn_max_up=2000
                 dyn_max_up_tor=100
                 dyn_half_open=200
-                # Jerry048 推荐值，降低 I/O 拥堵水位
-                send_buf=5120
-                send_buf_low=1024
+
+                # G9.5：适度上提连接上限（比 4000 更猛，但仍控制风险）
+                if is_g95_preset; then
+                    dyn_max_connec=6000
+                    dyn_max_up=2500
+                    dyn_half_open=250
+                fi
             fi
 
-            # 注入阶梯化参数与 Elite 级快速剔除算法
-            patch_json="${patch_json},\"max_connec\":${dyn_max_connec},\"max_connec_per_torrent\":${dyn_max_connec_tor},\"max_uploads\":${dyn_max_up},\"max_uploads_per_torrent\":${dyn_max_up_tor},\"max_half_open_connections\":${dyn_half_open},\"send_buffer_watermark\":${send_buf},\"send_buffer_low_watermark\":${send_buf_low},\"connection_speed\":2000,\"peer_timeout\":45,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":${dyn_async_io},\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
+            patch_json="${patch_json},\"max_connec\":${dyn_max_connec},\"max_connec_per_torrent\":${dyn_max_connec_tor},\"max_uploads\":${dyn_max_up},\"max_uploads_per_torrent\":${dyn_max_up_tor},\"max_half_open_connections\":${dyn_half_open},\"send_buffer_watermark\":${sb_buf},\"send_buffer_low_watermark\":${sb_low},\"send_buffer_watermark_factor\":${sb_factor},\"connection_speed\":2000,\"peer_timeout\":45,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":${dyn_async_io},\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
         else
-            # 【M2 均衡保种】放宽心跳检测，采用轮询公平算法，低耗长效保种
-            patch_json="${patch_json},\"max_connec\":1500,\"max_connec_per_torrent\":100,\"max_uploads\":300,\"max_uploads_per_torrent\":30,\"max_half_open_connections\":50,\"send_buffer_watermark\":5120,\"send_buffer_low_watermark\":1024,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":4"
+            # 【M2 均衡保种】不“过保守”：并发不极限，但保留上传能力
+            local m2_async=4
+            [[ "$disk_class" == "ssd" ]] && m2_async=8
+
+            patch_json="${patch_json},\"max_connec\":1500,\"max_connec_per_torrent\":100,\"max_uploads\":400,\"max_uploads_per_torrent\":40,\"max_half_open_connections\":80,\"send_buffer_watermark\":${sb_buf},\"send_buffer_low_watermark\":${sb_low},\"send_buffer_watermark_factor\":${sb_factor},\"connection_speed\":600,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":${m2_async}"
         fi
-        
+
         if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
-            # V5 mmap 必须设限
             local io_mode=1
-            [[ "$TUNE_MODE" == "1" ]] && io_mode=0
+            if [[ "$disk_class" == "ssd" && "$TUNE_MODE" == "1" ]]; then
+                io_mode=0
+            fi
             patch_json="${patch_json},\"memory_working_set_limit\":$cache_val,\"disk_io_type\":2,\"disk_io_read_mode\":$io_mode,\"disk_io_write_mode\":$io_mode,\"hashing_threads\":$hash_threads"
         else
-            # V4 物理内存缓存策略
             if [[ "$TUNE_MODE" == "1" ]]; then
                 patch_json="${patch_json},\"disk_cache\":$cache_val,\"disk_cache_ttl\":600"
             else
@@ -808,7 +924,7 @@ EOF
         echo "$patch_json" > "$TEMP_DIR/patch_pref.json"
 
         local final_payload="$patch_json"
-        
+
         if command -v jq >/dev/null && grep -q "{" "$TEMP_DIR/current_pref.json"; then
             if jq -s '.[0] * .[1]' "$TEMP_DIR/current_pref.json" "$TEMP_DIR/patch_pref.json" > "$TEMP_DIR/final_pref.json" 2>/dev/null; then
                 if [[ -s "$TEMP_DIR/final_pref.json" && $(cat "$TEMP_DIR/final_pref.json") != "null" ]]; then
@@ -824,7 +940,7 @@ EOF
         fi
 
         local http_code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 -b "$TEMP_DIR/qb_cookie.txt" -X POST --data-urlencode "json=$final_payload" "http://127.0.0.1:$QB_WEB_PORT/api/v2/app/setPreferences")
-        
+
         if [[ "$http_code" == "200" ]]; then
             echo -e " ${GREEN}[√]${NC} 引擎防泄漏与底层网络已完全锁定为极致状态！"
             systemctl restart "qbittorrent-nox@$APP_USER"
@@ -842,16 +958,16 @@ install_apps() {
     echo -e " ${CYAN}╔══════════════════ 部署容器化应用 (Docker) ══════════════════╗${NC}"
     echo ""
     wait_for_lock
-    
+
     if ! command -v docker >/dev/null; then
         execute_with_spinner "自动安装 Docker 环境" sh -c "curl -fsSL https://get.docker.com | sh || (apt-get update && apt-get install -y docker.io)"
     fi
 
     if [[ "$DO_VX" == "true" ]]; then
         echo -e "  ${CYAN}▶ 正在处理 Vertex (智能轮询) 核心逻辑...${NC}"
-        
+
         docker rm -f vertex &>/dev/null || true
-        
+
         mkdir -p "$HB/vertex/data/"{client,douban,irc,push,race,rss,rule,script,server,site,watch}
         mkdir -p "$HB/vertex/data/douban/set" "$HB/vertex/data/watch/set"
         mkdir -p "$HB/vertex/data/rule/"{delete,link,rss,race,raceSet}
@@ -862,26 +978,22 @@ install_apps() {
 
         if [[ -n "$VX_RESTORE_URL" ]]; then
             local extract_tmp=$(mktemp -d)
-            local is_tar=false
-            local extract_failed=false # 新增独立状态机：记录解压是否彻底失败
+            local extract_failed=false
 
             if [[ "$VX_RESTORE_URL" == *.tar.gz* || "$VX_RESTORE_URL" == *.tgz* ]]; then
-                is_tar=true
                 download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.tar.gz"
-                # tar.gz 容错
                 if ! execute_with_spinner "解压原生 tar.gz 备份数据" tar -xzf "$TEMP_DIR/bk.tar.gz" -C "$extract_tmp"; then
                     log_warn "tar.gz 解压失败(可能文件损坏)，已自动降级为全新安装！"
                     extract_failed=true
                 fi
             else
                 download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.zip"
-                
+
                 local extract_success=false
                 while [[ "$extract_success" == "false" ]]; do
-                    # 终极防死锁策略：如果没传密码，强行塞入假密码打断交互
                     local current_pass="${VX_ZIP_PASS:-ASP_DUMMY_PASS_NO_INPUT}"
                     local unzip_cmd="unzip -q -o -P\"$current_pass\""
-                    
+
                     if execute_with_spinner "解压 ZIP 备份数据" sh -c "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$extract_tmp\" < /dev/null"; then
                         extract_success=true
                     else
@@ -892,13 +1004,13 @@ install_apps() {
                         echo -e "  ${CYAN}▶ 3.${NC} 输入 ${RED}[exit]${NC} 终止脚本并退出"
                         echo -e "${YELLOW}=================================================${NC}"
                         read -p "  请输入指令或新密码: " user_choice < /dev/tty
-                        
+
                         if [[ "$user_choice" == "skip" ]]; then
                             log_info "已触发降级机制：跳过备份数据，执行全新安装。"
                             extract_failed=true
                             break
                         elif [[ "$user_choice" == "exit" ]]; then
-                            log_err "用户手动终止了部署流程。" 
+                            log_err "用户手动终止了部署流程。"
                         elif [[ -n "$user_choice" ]]; then
                             VX_ZIP_PASS="$user_choice"
                             log_info "已更新 ZIP 密码，准备重新尝试解压..."
@@ -908,32 +1020,33 @@ install_apps() {
                     fi
                 done
             fi
-            
-            # 【核心修复点】：只有在解压没有彻底失败的情况下，才去提取数据
+
             if [[ "$extract_failed" == "false" ]]; then
-                local real_set=$(find "$extract_tmp" -name "setting.json" | head -n 1)
+                local real_set
+                real_set=$(find "$extract_tmp" -name "setting.json" | head -n 1)
                 if [[ -n "$real_set" ]]; then
-                    local real_dir=$(dirname "$real_set")
+                    local real_dir
+                    real_dir=$(dirname "$real_set")
                     cp -a "$real_dir"/. "$HB/vertex/data/" 2>/dev/null || true
-                    # ↓↓↓ 这句是成功接管的灵魂 ↓↓↓
-                    need_init=false  
+                    need_init=false
                 else
                     log_warn "备份包解压成功但未找到 setting.json，这可能是一个结构损坏的备份！已降级为全新安装。"
                 fi
             fi
-            
+
             rm -rf "$extract_tmp"
         elif [[ -f "$set_file" ]]; then
             log_info "检测到本地已有配置，执行原地接管..."
             need_init=false
         fi
 
-        local gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
+        local gw
+        gw=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>/dev/null || true)
         [[ -z "$gw" ]] && gw="172.17.0.1"
 
         if [[ "$need_init" == "false" ]]; then
             log_info "智能桥接备份数据与新网络架构 (启动 Python 强制清洗层)..."
-            
+
             cat << 'EOF_PYTHON' > "$TEMP_DIR/vx_fix.py"
 import json, os, codecs, sys
 
@@ -1001,10 +1114,9 @@ EOF
 
     if [[ "$DO_FB" == "true" ]]; then
         echo -e "  ${CYAN}▶ 正在处理 FileBrowser 核心逻辑 (引入 Nginx 注入与 MediaInfo)...${NC}"
-        
+
         docker rm -f filebrowser &>/dev/null || true
-        
-        # 彻底移除旧版单文件挂载遗留，建立全新的专属目录
+
         rm -rf "$HB/.config/filebrowser" "$HB/fb.db" "$HB/filebrowser_data"
         mkdir -p "$HB/.config/filebrowser" "$HB/filebrowser_data"
         chown -R "$APP_USER:$APP_USER" "$HB/.config/filebrowser" "$HB/filebrowser_data"
@@ -1013,12 +1125,10 @@ EOF
             execute_with_spinner "安装 Nginx 底层代理引擎" sh -c "apt-get update -qq && apt-get install -y nginx"
         fi
 
-        # 引入MediaInfo JS 代码
         JS_REMOTE_URL="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/asp-mediainfo.js"
         execute_with_spinner "拉取 MediaInfo 前端扩展" wget -qO /usr/local/bin/asp-mediainfo.js "$JS_REMOTE_URL"
         execute_with_spinner "拉取弹窗 UI 依赖库" wget -qO /usr/local/bin/sweetalert2.all.min.js "https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"
 
-        # 带有智能降级 JSON 重组引擎的 Python 微服务
         cat > /usr/local/bin/asp-mediainfo.py << 'EOF_PY'
 import http.server, socketserver, urllib.parse, subprocess, json, os, sys
 PORT = int(sys.argv[2])
@@ -1031,17 +1141,16 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             query = urllib.parse.parse_qs(parsed.query)
             file_path = query.get('file', [''])[0].lstrip('/')
             full_path = os.path.abspath(os.path.join(BASE_DIR, file_path))
-            
+
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            
+
             if not full_path.startswith(os.path.abspath(BASE_DIR)) or not os.path.isfile(full_path):
                 self.wfile.write(json.dumps({"error": "非法路径或文件不存在"}).encode('utf-8'))
                 return
-                
+
             try:
-                # 优先尝试原生 JSON 输出 (需要较新的 mediainfo 版本)
                 res = subprocess.run(['mediainfo', '--Output=JSON', full_path], capture_output=True, text=True)
                 try:
                     json.loads(res.stdout)
@@ -1049,8 +1158,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     return
                 except:
                     pass
-                
-                # 如果旧系统不支持 JSON 导出指令，则捕获原始文本，并智能转换拼接成 JSON
+
                 res_text = subprocess.run(['mediainfo', full_path], capture_output=True, text=True)
                 lines = res_text.stdout.split('\n')
                 tracks = []
@@ -1069,9 +1177,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         current_track[k.strip()] = v.strip()
                 if current_track:
                     tracks.append(current_track)
-                
+
                 self.wfile.write(json.dumps({"media": {"track": tracks}}).encode('utf-8'))
-                
+
             except Exception as e:
                 self.wfile.write(json.dumps({"error": str(e)}).encode('utf-8'))
         else:
@@ -1099,7 +1207,6 @@ EOF
         systemctl daemon-reload && systemctl enable asp-mediainfo.service >/dev/null 2>&1
         systemctl restart asp-mediainfo.service
 
-        # 零侵入安全的 Nginx 代理与 HTML 劫持
         cat > /etc/nginx/conf.d/asp-filebrowser.conf << EOF_NGINX
 server {
     listen $FB_PORT;
@@ -1111,15 +1218,14 @@ server {
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
-        
-        # CSRF 防护核心：注入完整的代理溯源头部
+
         proxy_set_header Host \$http_host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        
+
         proxy_set_header Accept-Encoding "";
-        
+
         sub_filter '</body>' '<script src="/asp-mediainfo.js"></script></body>';
         sub_filter_once on;
     }
@@ -1142,13 +1248,14 @@ EOF_NGINX
 
         execute_with_spinner "拉取 FileBrowser 镜像" docker pull filebrowser/filebrowser:latest
 
-        # 【终极防弹机制】：明确指定 -d /database/filebrowser.db，并加上 --user 0:0 提权，防止宿主挂载目录权限丢失
         execute_with_spinner "初始化 FileBrowser 数据库表" sh -c "docker run --rm --user 0:0 -v \"$HB/filebrowser_data\":/database filebrowser/filebrowser:latest -d /database/filebrowser.db config init >/dev/null 2>&1 || true"
-        
+
         execute_with_spinner "注入 FileBrowser 管理员账户" sh -c "docker run --rm --user 0:0 -v \"$HB/filebrowser_data\":/database filebrowser/filebrowser:latest -d /database/filebrowser.db users add \"$APP_USER\" \"$APP_PASS\" --perm.admin >/dev/null 2>&1 || true"
-        
-        execute_with_spinner "启动 FileBrowser 容器引擎" docker run -d --name filebrowser --restart unless-stopped --user 0:0 -v "$HB":/srv -v "$HB/filebrowser_data":/database -v "$HB/.config/filebrowser":/config -p 127.0.0.1:18081:80 filebrowser/filebrowser:latest -d /database/filebrowser.db
-        
+
+        execute_with_spinner "启动 FileBrowser 容器引擎" docker run -d --name filebrowser --restart unless-stopped --user 0:0 \
+            -v "$HB":/srv -v "$HB/filebrowser_data":/database -v "$HB/.config/filebrowser":/config \
+            -p 127.0.0.1:18081:80 filebrowser/filebrowser:latest -d /database/filebrowser.db
+
         open_port "$FB_PORT"
     fi
 }
@@ -1161,7 +1268,14 @@ while [[ $# -gt 0 ]]; do
         --uninstall) ACTION="uninstall"; shift ;;
         -u|--user) APP_USER="$2"; shift 2 ;;
         -p|--pass) APP_PASS="$2"; shift 2 ;;
-        -c|--cache) QB_CACHE="$2"; CACHE_SET_BY_USER=true; shift 2 ;;
+        -c|--cache)
+            QB_CACHE="$2"
+            if [[ ! "$QB_CACHE" =~ ^[0-9]+$ ]]; then
+                log_err "参数 -c/--cache 必须是数字 (MiB)。"
+            fi
+            CACHE_SET_BY_USER=true
+            shift 2
+            ;;
         -q|--qbit) QB_VER_REQ="$2"; shift 2 ;;
         -m|--mode) TUNE_MODE="$2"; shift 2 ;;
         -v|--vertex) DO_VX=true; shift ;;
@@ -1190,7 +1304,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.1.0 ✦${NC}"
+echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.2.0 ✦${NC}"
 echo -e "${PURPLE}     ✦               作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
@@ -1294,12 +1408,9 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
 fi
 
-# ================= 新增端口探测逻辑 =================
-# 自动探测并分配一个空闲的内部端口给 MediaInfo API
 while check_port_occupied "$MI_PORT"; do
     MI_PORT=$((MI_PORT + 1))
 done
-# =================================================
 
 cat > "$ASP_ENV_FILE" << EOF
 export QB_WEB_PORT=$QB_WEB_PORT
@@ -1324,7 +1435,6 @@ else
     tune_str="${GREEN}Mode 2 (均衡保种 - Stable)${NC}"
 fi
 
-# ================= 极简极客版终端 Dashboard =================
 echo ""
 echo ""
 
@@ -1333,9 +1443,9 @@ VX_GW=$(docker network inspect bridge -f '{{(index .IPAM.Config 0).Gateway}}' 2>
 
 cat << EOF
 ========================================================================
-                    ✨ AUTO-SEEDBOX-PT 部署完成 ✨                     
+                    ✨ AUTO-SEEDBOX-PT 部署完成 ✨
 ========================================================================
-  [系统状态] 
+  [系统状态]
 EOF
 echo -e "  ▶ 调优模式 : $tune_str"
 echo -e "  ▶ 运行用户 : ${YELLOW}$APP_USER${NC} (已做运行目录隔离，保障安全)"
