@@ -512,8 +512,28 @@ done
 ETH=\$(ip -o -4 route show to default | awk '{print \$5}' | head -1)
 if [ -n "\$ETH" ]; then
     ifconfig "\$ETH" txqueuelen 10000 2>/dev/null
-    ethtool -G "\$ETH" rx 4096 tx 4096 2>/dev/null || true
-    ethtool -G "\$ETH" rx 2048 tx 2048 2>/dev/null || true 
+    # 尝试扩容 Ring Buffer，容忍失败
+    ethtool -G "\$ETH" rx 4096 tx 4096 2>/dev/null || ethtool -G "\$ETH" rx 2048 tx 2048 2>/dev/null || true 
+    
+    if [[ "$TUNE_MODE" == "1" ]]; then
+        # 【核心黑科技】：开启 RPS/RFS 软中断网卡多核均衡 (防单核 100% 瓶颈)
+        CPUS=\$(nproc 2>/dev/null || echo 1)
+        if [[ \$CPUS -gt 1 ]]; then
+            # 计算全核心 16 进制掩码 (例如 4核 为 f, 8核 为 ff)
+            MASK=\$(printf "%x" \$(( (1 << CPUS) - 1 )))
+            
+            # 开启 RPS (Receive Packet Steering)
+            for rxq in /sys/class/net/\$ETH/queues/rx-*; do
+                [ -w "\$rxq/rps_cpus" ] && echo "\$MASK" > "\$rxq/rps_cpus" 2>/dev/null
+            done
+            
+            # 开启 RFS (Receive Flow Steering) 匹配应用层线程
+            [ -w /proc/sys/net/core/rps_sock_flow_entries ] && echo 32768 > /proc/sys/net/core/rps_sock_flow_entries 2>/dev/null
+            for rxq in /sys/class/net/\$ETH/queues/rx-*; do
+                [ -w "\$rxq/rps_flow_cnt" ] && echo 4096 > "\$rxq/rps_flow_cnt" 2>/dev/null
+            done
+        fi
+    fi
 fi
 DEF_ROUTE=\$(ip -o -4 route show to default | head -n1)
 if [[ -n "\$DEF_ROUTE" ]]; then
@@ -547,6 +567,7 @@ EOF
     if [[ "$TUNE_MODE" == "1" ]]; then
         echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (激进写盘适配 NVMe)"
         echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${RED}performance${NC} (锁定最高主频)"
+        echo -e "  ${CYAN}└─${NC} 网卡软中断池 : ${RED}RPS/RFS 多核亲和性均衡已激活${NC} (破除单核瓶颈)"
     else
         echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (均衡平稳回写)"
         echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${GREEN}ondemand/schedutil${NC} (动态节能)"
@@ -849,8 +870,9 @@ install_apps() {
                 
                 local extract_success=false
                 while [[ "$extract_success" == "false" ]]; do
-                    local unzip_cmd="unzip -q -o"
-                    [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -q -o -P\"$VX_ZIP_PASS\""
+                    # 终极防死锁策略：如果没传密码，强行塞入假密码打断交互
+                    local current_pass="${VX_ZIP_PASS:-ASP_DUMMY_PASS_NO_INPUT}"
+                    local unzip_cmd="unzip -q -o -P\"$current_pass\""
                     
                     # 利用 if 拦截异常，防止 set -e 导致脚本直接崩溃
                     if execute_with_spinner "解压 ZIP 备份数据" sh -c "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$extract_tmp\" < /dev/null"; then
@@ -1160,7 +1182,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.0.2 ✦${NC}"
+echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.0.4 ✦${NC}"
 echo -e "${PURPLE}     ✦              作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
