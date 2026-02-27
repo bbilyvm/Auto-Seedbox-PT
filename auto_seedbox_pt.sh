@@ -199,7 +199,13 @@ setup_user() {
         log_info "系统用户 $APP_USER 已存在，复用之。"
     else
         log_info "创建隔离系统用户: $APP_USER"
-        useradd -m -s /bin/bash "$APP_USER"
+        # 检查同名用户组是否已经存在
+        if getent group "$APP_USER" >/dev/null 2>&1; then
+            log_warn "检测到同名用户组已存在，正在将其指定为主要组..."
+            useradd -m -s /bin/bash -g "$APP_USER" "$APP_USER"
+        else
+            useradd -m -s /bin/bash "$APP_USER"
+        fi
     fi
 
     HB=$(eval echo ~$APP_USER)
