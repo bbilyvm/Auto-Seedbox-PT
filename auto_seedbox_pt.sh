@@ -376,38 +376,38 @@ optimize_system() {
     local mem_gb_sys=$((mem_kb / 1024 / 1024))
     
     # 基础安全底线 (面向 4GB - 8GB 的常规 VPS)
-    local rmem_max=67108864      # 64MB TCP缓冲
+    local rmem_max=16777216      # 16MB TCP缓冲 (Jerry048 推荐安全值，防 OOM)
     local dirty_ratio=20
     local dirty_bg_ratio=5
     local backlog=30000          # 黄金队列长度，防 CPU Steal
     local syn_backlog=65535
     
     if [[ "$TUNE_MODE" == "1" ]]; then
-        # 【动态自适应计算：全面解除 NVMe 封印】
+        # 【动态自适应计算：结合Jerry048防溢出体系】
         if [[ $mem_gb_sys -ge 30 ]]; then
-            # 纯血独服/大内存怪兽 (32G+)：极度奔放，TCP 缓冲拉满 1GB
-            rmem_max=1073741824
-            dirty_ratio=50
-            dirty_bg_ratio=15
-            backlog=100000
-            syn_backlog=200000
-            echo -e "  ${PURPLE}↳ 检测到纯血级算力 (>=32GB)，已解锁最高序列内核权限 (1GB Buffer)！${NC}"
-        elif [[ $mem_gb_sys -ge 15 ]]; then
-            # 中大型 VPS/独服 (16G-31G)：平衡吞吐与延迟，TCP 缓冲 512MB
-            rmem_max=536870912
+            # 纯血独服/大内存怪兽 (32G+)：TCP 缓冲 64MB
+            rmem_max=67108864
             dirty_ratio=40
+            dirty_bg_ratio=10
+            backlog=100000
+            syn_backlog=100000
+            echo -e "  ${PURPLE}↳ 检测到纯血级算力 (>=32GB)，已解锁高位内核权限 (64MB Buffer)！${NC}"
+        elif [[ $mem_gb_sys -ge 15 ]]; then
+            # 中大型 VPS/独服 (16G-31G)：平衡吞吐与延迟，TCP 缓冲 32MB
+            rmem_max=33554432
+            dirty_ratio=30
             dirty_bg_ratio=10
             backlog=50000
             syn_backlog=100000
-            echo -e "  ${PURPLE}↳ 检测到中大型算力 (>=16GB)，已挂载进阶序列内核权限 (512MB Buffer)。${NC}"
+            echo -e "  ${PURPLE}↳ 检测到中大型算力 (>=16GB)，已挂载进阶内核权限 (32MB Buffer)。${NC}"
         else
-            # 常规级算力 (如 NCG9.5 8G)：匹配 2.5G 端口，TCP 缓冲 256MB，释放 NVMe 顺序写能力
-            rmem_max=268435456
-            dirty_ratio=30
-            dirty_bg_ratio=10
+            # 常规级算力 (如 NCG9.5 8G)：严格限制 TCP 缓冲在 16MB，彻底告别网络栈 OOM
+            rmem_max=16777216
+            dirty_ratio=20
+            dirty_bg_ratio=5
             backlog=30000
             syn_backlog=65535
-            echo -e "  ${PURPLE}↳ 检测到常规级算力 (<16GB)，已为您挂载 NVMe 激进并发矩阵 (256MB Buffer)。${NC}"
+            echo -e "  ${PURPLE}↳ 检测到常规级算力 (<16GB)，已挂载防 OOM 并发矩阵 (16MB Buffer)。${NC}"
         fi
     fi
 
@@ -442,7 +442,6 @@ fs.nr_open = 1048576
 vm.swappiness = 1
 EOF
 
-    # 核心修改：Mode 1 彻底废弃死板的 dirty_bytes，全面拥抱 ratio
     cat >> /etc/sysctl.d/99-ptbox.conf << EOF
 vm.dirty_ratio = $dirty_ratio
 vm.dirty_background_ratio = $dirty_bg_ratio
@@ -561,7 +560,7 @@ EOF
     echo -e "  ${PURPLE}[⚡ ASP-Tuned Elite 核心调优已挂载]${NC}"
     echo -e "  ${CYAN}├─${NC} 拥塞控制算法 : ${GREEN}${ui_cc}${NC} (智能穿透匹配)"
     echo -e "  ${CYAN}├─${NC} 全局并发上限 : ${YELLOW}1,048,576${NC} (解除 Socket 封印)"
-    echo -e "  ${CYAN}├─${NC} TCP 缓冲上限 : ${YELLOW}${rmem_mb} MB${NC} (动态智能感知)"
+    echo -e "  ${CYAN}├─${NC} TCP 缓冲上限 : ${YELLOW}${rmem_mb} MB${NC} (动态智能感知防 OOM)"
     if [[ "$TUNE_MODE" == "1" ]]; then
         echo -e "  ${CYAN}├─${NC} 脏页回写策略 : ${YELLOW}ratio=${dirty_ratio}, bg_ratio=${dirty_bg_ratio}${NC} (激进写盘适配 NVMe)"
         echo -e "  ${CYAN}├─${NC} CPU 调度策略 : ${RED}performance${NC} (锁定最高主频)"
@@ -630,11 +629,19 @@ install_qbit() {
     
     local pass_hash=$(python3 -c "import sys, base64, hashlib, os; salt = os.urandom(16); dk = hashlib.pbkdf2_hmac('sha512', sys.argv[1].encode(), salt, 100000); print(f'@ByteArray({base64.b64encode(salt).decode()}:{base64.b64encode(dk).decode()})')" "$APP_PASS")
     
+    # 融合 Jerry048 的缓存计算哲学
     if [[ "${CACHE_SET_BY_USER:-false}" == "false" ]]; then
         local total_mem_mb=$(free -m | awk '/^Mem:/{print $2}')
         if [[ "$TUNE_MODE" == "1" ]]; then
-            QB_CACHE=$((total_mem_mb * 35 / 100))
+            if [[ "$INSTALLED_MAJOR_VER" == "4" ]]; then
+                # 兼顾 V4 极限刷流与内存防溢出，设定为 15%
+                QB_CACHE=$((total_mem_mb * 15 / 100))
+            else
+                # V5 (mmap) 维持 25% 的工作集限制
+                QB_CACHE=$((total_mem_mb / 4))
+            fi
         else
+            # M2 均衡保种模式 (V4给15%保底，V5由系统调度无需庞大工作集)
             QB_CACHE=$((total_mem_mb * 15 / 100))
             [[ $QB_CACHE -gt 2048 ]] && QB_CACHE=2048
         fi
@@ -678,6 +685,7 @@ EOF
 
     chown "$APP_USER:$APP_USER" "$config_file"
     
+    # 移除 Systemd 绞索，交给内核 OOM 接管
     cat > /etc/systemd/system/qbittorrent-nox@.service << EOF
 [Unit]
 Description=qBittorrent Service (User: %i)
@@ -689,8 +697,6 @@ Group=$APP_USER
 ExecStart=/usr/bin/qbittorrent-nox --webui-port=$QB_WEB_PORT
 Restart=on-failure
 LimitNOFILE=1048576
-MemoryHigh=80%
-MemoryMax=85%
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -724,63 +730,65 @@ EOF
             local mem_kb_qbit=$(grep MemTotal /proc/meminfo | awk '{print $2}')
             local mem_gb_qbit=$((mem_kb_qbit / 1024 / 1024))
             
-            # 【核心重构：彻底解除并发锁死，拥抱高水位】
+            # 【核心重构：引入 Jerry048 防溢出并发墙梯队】
             local dyn_async_io=8
-            local dyn_max_connec=20000
-            local dyn_max_connec_tor=1000
-            local dyn_max_up=5000
-            local dyn_max_up_tor=300
-            local dyn_half_open=500
-            local send_buf=20480
-            local send_buf_low=5120
+            local dyn_max_connec=4000
+            local dyn_max_connec_tor=200
+            local dyn_max_up=2000
+            local dyn_max_up_tor=100
+            local dyn_half_open=200
+            local send_buf=5120
+            local send_buf_low=1024
 
             if [[ $mem_gb_qbit -ge 30 ]]; then
-                # 纯血物理独服 (32G+)：海量并发轰炸，超级水位
-                dyn_async_io=24
-                dyn_max_connec=80000
-                dyn_max_connec_tor=5000
-                dyn_max_up=20000
-                dyn_max_up_tor=1000
-                dyn_half_open=2000
-                send_buf=51200
-                send_buf_low=10240
-            elif [[ $mem_gb_qbit -ge 15 ]]; then
-                # 中大型机器 (16G-31G)：阶梯放宽
+                # 纯血物理独服 (32G+)：海量并发轰炸
                 dyn_async_io=16
-                dyn_max_connec=40000
-                dyn_max_connec_tor=2000
+                dyn_max_connec=30000
+                dyn_max_connec_tor=1000
                 dyn_max_up=10000
-                dyn_max_up_tor=500
+                dyn_max_up_tor=300
                 dyn_half_open=1000
-                send_buf=40960
-                send_buf_low=10240
-            elif [[ $mem_gb_qbit -lt 6 ]]; then
-                # 入门级小鸡 (<6G)：防死机收敛
-                dyn_async_io=4
-                dyn_max_connec=5000
+                send_buf=20480
+                send_buf_low=5120
+            elif [[ $mem_gb_qbit -ge 15 ]]; then
+                # 中大型机器 (16G-31G)
+                dyn_async_io=8
+                dyn_max_connec=10000
                 dyn_max_connec_tor=500
-                dyn_max_up=1000
-                dyn_max_up_tor=100
-                dyn_half_open=300
+                dyn_max_up=5000
+                dyn_max_up_tor=200
+                dyn_half_open=500
                 send_buf=10240
                 send_buf_low=3072
+            elif [[ $mem_gb_qbit -lt 6 ]]; then
+                # 入门级小鸡 (<6G)
+                dyn_async_io=4
+                dyn_max_connec=2000
+                dyn_max_connec_tor=100
+                dyn_max_up=500
+                dyn_max_up_tor=50
+                dyn_half_open=100
+                # Jerry048 弱性能机器标配水位
+                send_buf=5120
+                send_buf_low=1024
             else
-                # 常规机器 (6G-14G，涵盖 NCG9.5)：激进并发
-                dyn_async_io=8
-                dyn_max_connec=20000
-                dyn_max_connec_tor=1000
-                dyn_max_up=5000
-                dyn_max_up_tor=300
-                dyn_half_open=500
-                send_buf=30720
-                send_buf_low=8192
+                # 常规机器 (6G-14G，涵盖 NCG9.5)：限制并发墙，防止连接数雪崩
+                dyn_async_io=8              # Jerry推荐 NVMe/SSD 用 8
+                dyn_max_connec=4000         # 从原先的 20000 暴降至 4000，遏制内核 OOM
+                dyn_max_connec_tor=200      # 限制单种并发，拒绝无效握手
+                dyn_max_up=2000
+                dyn_max_up_tor=100
+                dyn_half_open=200
+                # Jerry048 推荐值，降低 I/O 拥堵水位
+                send_buf=5120
+                send_buf_low=1024
             fi
 
             # 注入阶梯化参数与 Elite 级快速剔除算法
             patch_json="${patch_json},\"max_connec\":${dyn_max_connec},\"max_connec_per_torrent\":${dyn_max_connec_tor},\"max_uploads\":${dyn_max_up},\"max_uploads_per_torrent\":${dyn_max_up_tor},\"max_half_open_connections\":${dyn_half_open},\"send_buffer_watermark\":${send_buf},\"send_buffer_low_watermark\":${send_buf_low},\"connection_speed\":2000,\"peer_timeout\":45,\"upload_choking_algorithm\":1,\"seed_choking_algorithm\":1,\"async_io_threads\":${dyn_async_io},\"max_active_downloads\":-1,\"max_active_uploads\":-1,\"max_active_torrents\":-1"
         else
             # 【M2 均衡保种】放宽心跳检测，采用轮询公平算法，低耗长效保种
-            patch_json="${patch_json},\"max_connec\":1500,\"max_connec_per_torrent\":100,\"max_uploads\":300,\"max_uploads_per_torrent\":30,\"max_half_open_connections\":50,\"send_buffer_watermark\":10240,\"send_buffer_low_watermark\":3072,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":4"
+            patch_json="${patch_json},\"max_connec\":1500,\"max_connec_per_torrent\":100,\"max_uploads\":300,\"max_uploads_per_torrent\":30,\"max_half_open_connections\":50,\"send_buffer_watermark\":5120,\"send_buffer_low_watermark\":1024,\"connection_speed\":500,\"peer_timeout\":120,\"upload_choking_algorithm\":0,\"seed_choking_algorithm\":0,\"async_io_threads\":4"
         fi
         
         if [[ "$INSTALLED_MAJOR_VER" == "5" ]]; then
@@ -1005,7 +1013,7 @@ EOF
             execute_with_spinner "安装 Nginx 底层代理引擎" sh -c "apt-get update -qq && apt-get install -y nginx"
         fi
 
-        # 引入你存放于 GitHub 的完美重构版 JS 代码
+        # 引入MediaInfo JS 代码
         JS_REMOTE_URL="https://github.com/yimouleng/Auto-Seedbox-PT/raw/refs/heads/main/asp-mediainfo.js"
         execute_with_spinner "拉取 MediaInfo 前端扩展" wget -qO /usr/local/bin/asp-mediainfo.js "$JS_REMOTE_URL"
         execute_with_spinner "拉取弹窗 UI 依赖库" wget -qO /usr/local/bin/sweetalert2.all.min.js "https://cdn.jsdelivr.net/npm/sweetalert2@11/dist/sweetalert2.all.min.js"
@@ -1182,7 +1190,7 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.0.5 ✦${NC}"
+echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.1.0 ✦${NC}"
 echo -e "${PURPLE}     ✦               作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
@@ -1244,7 +1252,7 @@ if [[ "$DO_TUNE" == "true" ]]; then
     if [[ "$TUNE_MODE" == "1" ]]; then
         echo -e "  当前选定模式: ${RED}极限抢种 (Mode 1 - Elite Dynamic)${NC}"
         echo -e "  推荐场景:     ${YELLOW}抢种打榜 / 追求瞬时满速爆发${NC}"
-        echo -e "  机制提示:     ${GREEN}阶梯自适应并发墙，防死锁微量写盘，最快上传匹配。${NC}"
+        echo -e "  机制提示:     ${GREEN}阶梯自适应并发墙，防 OOM 网络保护，最快上传匹配。${NC}"
         echo ""
         echo -e "  ${YELLOW}即刻为您加载极限引擎，3秒后开始部署...${NC}"
         sleep 3
@@ -1284,7 +1292,6 @@ if [[ "$CUSTOM_PORT" == "true" ]]; then
     QB_WEB_PORT=$(get_input_port "qBit WebUI" 8080); QB_BT_PORT=$(get_input_port "qBit BT监听" 20000)
     [[ "$DO_VX" == "true" ]] && VX_PORT=$(get_input_port "Vertex" 3000)
     [[ "$DO_FB" == "true" ]] && FB_PORT=$(get_input_port "FileBrowser" 8081)
-    # MI_PORT 不再对外暴露，仅用于 Nginx 内部通信映射，因此不再要求用户手动输入
 fi
 
 # ================= 新增端口探测逻辑 =================
