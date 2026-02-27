@@ -839,23 +839,60 @@ install_apps() {
             if [[ "$VX_RESTORE_URL" == *.tar.gz* || "$VX_RESTORE_URL" == *.tgz* ]]; then
                 is_tar=true
                 download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.tar.gz"
-                execute_with_spinner "解压原生 tar.gz 备份数据" tar -xzf "$TEMP_DIR/bk.tar.gz" -C "$extract_tmp"
+                # tar.gz 容错
+                if ! execute_with_spinner "解压原生 tar.gz 备份数据" tar -xzf "$TEMP_DIR/bk.tar.gz" -C "$extract_tmp"; then
+                    log_warn "tar.gz 解压失败(可能文件损坏)，已自动降级为全新安装！"
+                    need_init=true
+                fi
             else
                 download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.zip"
-                local unzip_cmd="unzip -q -o"
-                [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -q -o -P\"$VX_ZIP_PASS\""
-                execute_with_spinner "解压 ZIP 备份数据" sh -c "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$extract_tmp\""
+                
+                local extract_success=false
+                while [[ "$extract_success" == "false" ]]; do
+                    local unzip_cmd="unzip -q -o"
+                    [[ -n "$VX_ZIP_PASS" ]] && unzip_cmd="unzip -q -o -P\"$VX_ZIP_PASS\""
+                    
+                    # 利用 if 拦截异常，防止 set -e 导致脚本直接崩溃
+                    if execute_with_spinner "解压 ZIP 备份数据" sh -c "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$extract_tmp\" < /dev/null"; then
+                        extract_success=true
+                    else
+                        echo -e "\n${YELLOW}=================================================${NC}"
+                        log_warn "ZIP 解压失败！可能是【密码错误】或【文件损坏】。"
+                        echo -e "  ${CYAN}▶ 1.${NC} 输入 ${GREEN}[新密码]${NC} 立即重试解压"
+                        echo -e "  ${CYAN}▶ 2.${NC} 输入 ${YELLOW}[skip]${NC} 放弃恢复，降级为全新安装"
+                        echo -e "  ${CYAN}▶ 3.${NC} 输入 ${RED}[exit]${NC} 终止脚本并退出"
+                        echo -e "${YELLOW}=================================================${NC}"
+                        read -p "  请输入指令或新密码: " user_choice < /dev/tty
+                        
+                        if [[ "$user_choice" == "skip" ]]; then
+                            log_info "已触发降级机制：跳过备份数据，执行全新安装。"
+                            need_init=true
+                            break
+                        elif [[ "$user_choice" == "exit" ]]; then
+                            log_err "用户手动终止了部署流程。" # 这会调用 log_err 里的 exit 1 退出脚本
+                        elif [[ -n "$user_choice" ]]; then
+                            VX_ZIP_PASS="$user_choice"
+                            log_info "已更新 ZIP 密码，准备重新尝试解压..."
+                        else
+                            log_warn "输入为空，请重新选择！"
+                        fi
+                    fi
+                done
             fi
             
-            local real_set=$(find "$extract_tmp" -name "setting.json" | head -n 1)
-            if [[ -n "$real_set" ]]; then
-                local real_dir=$(dirname "$real_set")
-                cp -a "$real_dir"/. "$HB/vertex/data/" 2>/dev/null || true
-            else
-                log_warn "备份包解压后未找到 setting.json，这可能是一个损坏的备份文件！"
+            # 只有在非降级（提取成功）的情况下，才去寻找 setting.json
+            if [[ "$need_init" == "false" ]]; then
+                local real_set=$(find "$extract_tmp" -name "setting.json" | head -n 1)
+                if [[ -n "$real_set" ]]; then
+                    local real_dir=$(dirname "$real_set")
+                    cp -a "$real_dir"/. "$HB/vertex/data/" 2>/dev/null || true
+                else
+                    log_warn "备份包解压成功但未找到 setting.json，这可能是一个结构损坏的备份！已降级为全新安装。"
+                    need_init=true
+                fi
             fi
+            
             rm -rf "$extract_tmp"
-            need_init=false
         elif [[ -f "$set_file" ]]; then
             log_info "检测到本地已有配置，执行原地接管..."
             need_init=false
