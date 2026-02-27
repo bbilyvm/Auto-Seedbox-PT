@@ -146,6 +146,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/yimouleng/Auto-Seedbox-PT/mai
 
 目前想法是采用**动态闭环**的方式，做到在“抢种爆发期”把连接/握手拉高，在“系统压力上来时”自动收敛，做到：峰值更高（爆发期更激进）、更不容易 OOM（压力期自动退让）、长时间稳定（不靠人守着）
 
+3.X版本将会重大改变，引入这个动态方式：定时采样 PSI/IO/qb 状态，通过WebAPI动态setPreferences，做成一个运行时调度器！！！
+
 
 ---
 
