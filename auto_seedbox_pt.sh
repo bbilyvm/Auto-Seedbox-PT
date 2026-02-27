@@ -366,8 +366,6 @@ uninstall() {
 
 # ================= 4. 智能系统优化 (多阶层动态自适应版) =================
 
-# ================= 4. 智能系统优化 (多阶层动态自适应版 - 爆改激进版) =================
-
 optimize_system() {
     echo ""
     echo -e " ${CYAN}╔══════════════════ 系统内核优化 (ASP-Tuned Elite) ══════════════════╗${NC}"
@@ -857,13 +855,15 @@ install_apps() {
         if [[ -n "$VX_RESTORE_URL" ]]; then
             local extract_tmp=$(mktemp -d)
             local is_tar=false
+            local extract_failed=false # 新增独立状态机：记录解压是否彻底失败
+
             if [[ "$VX_RESTORE_URL" == *.tar.gz* || "$VX_RESTORE_URL" == *.tgz* ]]; then
                 is_tar=true
                 download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.tar.gz"
                 # tar.gz 容错
                 if ! execute_with_spinner "解压原生 tar.gz 备份数据" tar -xzf "$TEMP_DIR/bk.tar.gz" -C "$extract_tmp"; then
                     log_warn "tar.gz 解压失败(可能文件损坏)，已自动降级为全新安装！"
-                    need_init=true
+                    extract_failed=true
                 fi
             else
                 download_file "$VX_RESTORE_URL" "$TEMP_DIR/bk.zip"
@@ -874,7 +874,6 @@ install_apps() {
                     local current_pass="${VX_ZIP_PASS:-ASP_DUMMY_PASS_NO_INPUT}"
                     local unzip_cmd="unzip -q -o -P\"$current_pass\""
                     
-                    # 利用 if 拦截异常，防止 set -e 导致脚本直接崩溃
                     if execute_with_spinner "解压 ZIP 备份数据" sh -c "$unzip_cmd \"$TEMP_DIR/bk.zip\" -d \"$extract_tmp\" < /dev/null"; then
                         extract_success=true
                     else
@@ -888,10 +887,10 @@ install_apps() {
                         
                         if [[ "$user_choice" == "skip" ]]; then
                             log_info "已触发降级机制：跳过备份数据，执行全新安装。"
-                            need_init=true
+                            extract_failed=true
                             break
                         elif [[ "$user_choice" == "exit" ]]; then
-                            log_err "用户手动终止了部署流程。" # 这会调用 log_err 里的 exit 1 退出脚本
+                            log_err "用户手动终止了部署流程。" 
                         elif [[ -n "$user_choice" ]]; then
                             VX_ZIP_PASS="$user_choice"
                             log_info "已更新 ZIP 密码，准备重新尝试解压..."
@@ -902,15 +901,16 @@ install_apps() {
                 done
             fi
             
-            # 只有在非降级（提取成功）的情况下，才去寻找 setting.json
-            if [[ "$need_init" == "false" ]]; then
+            # 【核心修复点】：只有在解压没有彻底失败的情况下，才去提取数据
+            if [[ "$extract_failed" == "false" ]]; then
                 local real_set=$(find "$extract_tmp" -name "setting.json" | head -n 1)
                 if [[ -n "$real_set" ]]; then
                     local real_dir=$(dirname "$real_set")
                     cp -a "$real_dir"/. "$HB/vertex/data/" 2>/dev/null || true
+                    # ↓↓↓ 这句是成功接管的灵魂 ↓↓↓
+                    need_init=false  
                 else
                     log_warn "备份包解压成功但未找到 setting.json，这可能是一个结构损坏的备份！已降级为全新安装。"
-                    need_init=true
                 fi
             fi
             
@@ -1182,8 +1182,8 @@ echo -e "${CYAN}       / _ | / __/ |/ _ \\ ${NC}"
 echo -e "${CYAN}      / __ |_\\ \\  / ___/ ${NC}"
 echo -e "${CYAN}     /_/ |_/___/ /_/     ${NC}"
 echo -e "${BLUE}================================================================${NC}"
-echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.0.4 ✦${NC}"
-echo -e "${PURPLE}     ✦              作者：Supcutie              ✦${NC}"
+echo -e "${PURPLE}     ✦ Auto-Seedbox-PT (ASP) 极限部署引擎 v3.0.5 ✦${NC}"
+echo -e "${PURPLE}     ✦               作者：Supcutie              ✦${NC}"
 echo -e "${GREEN}    🚀 一键部署 qBittorrent + Vertex + FileBrowser 刷流引擎${NC}"
 echo -e "${YELLOW}   💡 GitHub：https://github.com/yimouleng/Auto-Seedbox-PT ${NC}"
 echo -e "${BLUE}================================================================${NC}"
